@@ -262,13 +262,16 @@ pub const IID_IUNKNOWN: GUID = GUID::new(
 ///
 /// Every COM interface vtable starts with these three methods at slots 0, 1, 2.
 /// This generates:
-/// - `IUnknownVTable` struct with function pointers
+/// - `IUnknownVTable<T>` struct with function pointers (generic for typed this pointer)
 /// - `IUnknown` wrapper struct with safe methods
 /// - `VTableLayout` impl
 /// - `iunknown_forwarders!` macro for derived interfaces
 /// - `iunknown_base_vtable!` macro for vtable initialization
+///
+/// The generic parameter `T` represents the concrete type implementing the interface,
+/// allowing type-safe function pointers with `*mut T` instead of `*mut c_void`.
 #[crate::proc::cppvtable(stdcall, no_iid, internal)]
-pub trait IUnknown {
+pub trait IUnknown<T> {
     /// Query for another interface by GUID.
     fn query_interface(&self, riid: *const GUID, ppv: *mut *mut c_void) -> HRESULT;
 

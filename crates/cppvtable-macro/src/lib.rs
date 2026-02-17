@@ -592,10 +592,25 @@ fn cppvtable_internal(config: VTableConfig, input: ItemTrait) -> Result<TokenStr
     // - Own method slots start at 0 (relative to derived portion)
     // - Total slot count = base slot count + own method count
     let krate = crate_path(config.internal);
+
+    // For generic interfaces, we need to propagate the type parameter to the base vtable.
+    // When a generic interface extends IUnknown, we use IUnknownVTable<T> so the
+    // function pointers have typed this pointers (*mut T) instead of *mut c_void.
     let base_vtable_field = config.base_interface.as_ref().map(|base_ident| {
-        quote! {
-            /// Inherited base interface vtable
-            pub base: <#base_ident as #krate::VTableLayout>::VTable
+        if has_type_params {
+            // Generic case: use base vtable with our type parameter
+            // e.g., IUnknownVTable<T> for IInArchive<T> extending IUnknown<T>
+            let base_vtable_name = format_ident!("{}VTable", base_ident);
+            quote! {
+                /// Inherited base interface vtable (with generic type parameter)
+                pub base: #krate::#base_vtable_name #type_generics
+            }
+        } else {
+            // Non-generic case: embed base vtable as a field
+            quote! {
+                /// Inherited base interface vtable
+                pub base: <#base_ident as #krate::VTableLayout>::VTable
+            }
         }
     });
 
@@ -711,7 +726,7 @@ fn cppvtable_internal(config: VTableConfig, input: ItemTrait) -> Result<TokenStr
                 #[cfg(target_arch = "x86")]
                 pub #dummy_name: unsafe extern #x86_cc fn(this: #self_ptr_type),
                 #[cfg(not(target_arch = "x86"))]
-                pub #dummy_name: unsafe extern "C" fn(this: #self_ptr_type)
+                pub #dummy_name: unsafe extern "system" fn(this: #self_ptr_type)
             });
             current_slot += 1;
         }
@@ -730,7 +745,7 @@ fn cppvtable_internal(config: VTableConfig, input: ItemTrait) -> Result<TokenStr
                 #(, #param_names: #param_types)*
             ) #output,
             #[cfg(not(target_arch = "x86"))]
-            pub #method_name: unsafe extern "C" fn(
+            pub #method_name: unsafe extern "system" fn(
                 this: #self_ptr_type
                 #(, #param_names: #param_types)*
             ) #output
@@ -826,7 +841,12 @@ fn cppvtable_internal(config: VTableConfig, input: ItemTrait) -> Result<TokenStr
     // If we have a base, total = base slot count + own slot count
     let own_slot_count = total_slot_count;
     let slot_count_expr = if let Some(ref base_ident) = config.base_interface {
-        quote! { <#base_ident as #krate::VTableLayout>::SLOT_COUNT + #own_slot_count }
+        if has_type_params {
+            // Generic case: base interface is also generic
+            quote! { <#base_ident #type_generics as #krate::VTableLayout>::SLOT_COUNT + #own_slot_count }
+        } else {
+            quote! { <#base_ident as #krate::VTableLayout>::SLOT_COUNT + #own_slot_count }
+        }
     } else {
         quote! { #own_slot_count }
     };
@@ -852,11 +872,20 @@ fn cppvtable_internal(config: VTableConfig, input: ItemTrait) -> Result<TokenStr
     };
 
     // Generate IUnknown forwarding methods if extending IUnknown
+    // Both generic and non-generic use .base, but with different pointer types
     let iunknown_wrappers = if config
         .base_interface
         .as_ref()
         .is_some_and(|name| name == "IUnknown")
     {
+        // Both generic and non-generic interfaces access IUnknown through .base
+        // Generic uses typed pointer (*mut T), non-generic uses *mut c_void
+        let this_cast = if has_type_params {
+            quote! { self as *const Self as #self_ptr_type }
+        } else {
+            quote! { self as *const Self as *mut std::ffi::c_void }
+        };
+
         quote! {
             /// Query for another interface by GUID (forwarded to base IUnknown)
             ///
@@ -871,7 +900,7 @@ fn cppvtable_internal(config: VTableConfig, input: ItemTrait) -> Result<TokenStr
             ) -> #krate::HRESULT {
                 unsafe {
                     ((*self.vtable).base.query_interface)(
-                        self as *const Self as *mut std::ffi::c_void,
+                        #this_cast,
                         riid,
                         ppv,
                     )
@@ -882,7 +911,7 @@ fn cppvtable_internal(config: VTableConfig, input: ItemTrait) -> Result<TokenStr
             #[inline]
             pub unsafe fn add_ref(&self) -> u32 {
                 unsafe {
-                    ((*self.vtable).base.add_ref)(self as *const Self as *mut std::ffi::c_void)
+                    ((*self.vtable).base.add_ref)(#this_cast)
                 }
             }
 
@@ -890,7 +919,7 @@ fn cppvtable_internal(config: VTableConfig, input: ItemTrait) -> Result<TokenStr
             #[inline]
             pub unsafe fn release(&self) -> u32 {
                 unsafe {
-                    ((*self.vtable).base.release)(self as *const Self as *mut std::ffi::c_void)
+                    ((*self.vtable).base.release)(#this_cast)
                 }
             }
         }
@@ -957,7 +986,7 @@ fn cppvtable_internal(config: VTableConfig, input: ItemTrait) -> Result<TokenStr
 
             #[allow(non_snake_case)]
             #[cfg(not(target_arch = "x86"))]
-            unsafe extern "C" fn [<__ $struct_name __ $interface_name __ #method_name_str>](
+            unsafe extern "system" fn [<__ $struct_name __ $interface_name __ #method_name_str>](
                 this: *mut ::std::ffi::c_void
                 #(, #params_with_types)*
             ) #qualified_output {
@@ -1528,7 +1557,7 @@ fn cppvtable_impl_internal(
 
                 #[allow(non_snake_case)]
                 #[cfg(not(target_arch = "x86"))]
-                unsafe extern "C" fn #dummy_wrapper(_this: *mut std::ffi::c_void) {
+                unsafe extern "system" fn #dummy_wrapper(_this: *mut std::ffi::c_void) {
                     panic!("Called reserved vtable slot {}", #current_slot);
                 }
             });
@@ -1578,7 +1607,7 @@ fn cppvtable_impl_internal(
 
             #[allow(non_snake_case)]
             #[cfg(not(target_arch = "x86"))]
-            unsafe extern "C" fn #wrapper_name(
+            unsafe extern "system" fn #wrapper_name(
                 this: *mut std::ffi::c_void
                 #(, #param_names: #param_types)*
             ) #output {
