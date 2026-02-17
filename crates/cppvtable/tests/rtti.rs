@@ -50,7 +50,7 @@ fn test_type_info_implements() {
 }
 
 #[test]
-fn test_query_interface() {
+fn test_cast_to() {
     let interfaces: &'static [InterfaceInfo] = Box::leak(Box::new([
         InterfaceInfo::new(&IID_100 as *const u8, 0),
         InterfaceInfo::new(&IID_200 as *const u8, 8),
@@ -63,16 +63,16 @@ fn test_query_interface() {
     let object_ptr = dummy.as_ptr() as *const c_void;
 
     unsafe {
-        // Query for interface at offset 0
-        let ptr1 = type_info.query_interface(object_ptr, &IID_100 as *const u8);
+        // Cast to interface at offset 0
+        let ptr1 = type_info.cast_to(object_ptr, &IID_100 as *const u8);
         assert_eq!(ptr1, object_ptr);
 
-        // Query for interface at offset 8
-        let ptr2 = type_info.query_interface(object_ptr, &IID_200 as *const u8);
+        // Cast to interface at offset 8
+        let ptr2 = type_info.cast_to(object_ptr, &IID_200 as *const u8);
         assert_eq!(ptr2, (object_ptr as *const u8).offset(8) as *const c_void);
 
-        // Query for non-existent interface
-        let ptr3 = type_info.query_interface(object_ptr, &IID_IFLYER as *const u8);
+        // Cast to non-existent interface returns null
+        let ptr3 = type_info.cast_to(object_ptr, &IID_IFLYER as *const u8);
         assert!(ptr3.is_null());
     }
 }

@@ -174,7 +174,7 @@ fn test_interface_info_offsets() {
 }
 
 #[test]
-fn test_rtti_query_interface_simulation() {
+fn test_rtti_cast_to_simulation() {
     use cppvtable::rtti::{TypeInfo, InterfaceInfo};
 
     // Manually create TypeInfo for MultiImpl (this would be auto-generated in future)
@@ -185,21 +185,21 @@ fn test_rtti_query_interface_simulation() {
 
     let type_info = TypeInfo::new(1, "MultiImpl", interfaces);
 
-    // Query should work
+    // Implements check should work
     assert!(type_info.implements(IFirst::interface_id_ptr()));
     assert!(type_info.implements(ISecond::interface_id_ptr()));
 
-    // Create object and test query_interface
+    // Create object and test cast_to
     let obj = MultiImpl::new(42);
     let obj_ptr = &obj as *const MultiImpl as *const std::ffi::c_void;
 
     unsafe {
-        // Query for IFirst (offset 0)
-        let first_ptr = type_info.query_interface(obj_ptr, IFirst::interface_id_ptr());
+        // Cast to IFirst (offset 0)
+        let first_ptr = type_info.cast_to(obj_ptr, IFirst::interface_id_ptr());
         assert_eq!(first_ptr, obj_ptr); // Same pointer
 
-        // Query for ISecond (offset 8)
-        let second_ptr = type_info.query_interface(obj_ptr, ISecond::interface_id_ptr());
+        // Cast to ISecond (offset 8)
+        let second_ptr = type_info.cast_to(obj_ptr, ISecond::interface_id_ptr());
         let expected_ptr = (obj_ptr as *const u8).offset(8) as *const std::ffi::c_void;
         assert_eq!(second_ptr, expected_ptr);
     }

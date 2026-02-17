@@ -77,11 +77,11 @@ impl TypeInfo {
         }
     }
 
-    /// Query for an interface by ID, returns adjusted pointer or null
+    /// Cast object pointer to a different interface, returns adjusted pointer or null
     ///
     /// # Safety
     /// - `object_ptr` must point to a valid instance of the type this TypeInfo describes
-    pub unsafe fn query_interface(&self, object_ptr: *const c_void, interface_id: *const u8) -> *const c_void {
+    pub unsafe fn cast_to(&self, object_ptr: *const c_void, interface_id: *const u8) -> *const c_void {
         for info in self.interfaces {
             if std::ptr::eq(info.interface_id, interface_id) {
                 // SAFETY: Caller guarantees object_ptr is valid and offset is correct for this type
