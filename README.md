@@ -105,7 +105,7 @@ unsafe {
 cppvtable/
 ├── Cargo.toml              # Workspace root
 └── crates/
-    ├── cppvtable/          # Main library (pure Rust)
+    ├── cppvtable/          # Main library (pure Rust, 63 tests)
     │   └── src/
     │       ├── lib.rs      # Re-exports both approaches
     │       ├── decl.rs     # Declarative macros
@@ -113,9 +113,11 @@ cppvtable/
     ├── cppvtable-macro/    # Proc-macro crate
     │   └── src/
     │       └── lib.rs      # #[cpp_interface], #[implement]
-    └── cppvtable-cpp-tests/ # C++ interop tests (requires MSVC)
+    └── cppvtable-cpp-tests/ # C++ interop tests (requires MSVC, 12 tests)
         └── src/
-            └── lib.rs      # Verifies vtable layout vs MSVC C++
+            ├── lib.rs      # C++ classes, helpers, Rust interfaces
+            ├── single.rs   # Single inheritance tests
+            └── multi.rs    # Multiple inheritance tests
 ```
 
 ## Testing
@@ -126,12 +128,17 @@ cargo test -p cppvtable
 
 # Run C++ interop tests (requires MSVC)
 cargo test -p cppvtable-cpp-tests
+
+# Run all tests
+cargo test --workspace
 ```
 
-The C++ interop tests verify vtable layout compatibility with actual MSVC-compiled C++ code:
-
-- Rust calling C++ objects via `from_ptr()`
-- C++ calling Rust objects through generated vtables
+**Test coverage (75 total):**
+- Single & multiple inheritance
+- This-pointer adjustment for secondary interfaces
+- Rust calling C++ objects, C++ calling Rust objects
+- TypeInfo/RTTI: `implements()`, `cast_to()`, null for unknown interfaces
+- VTable layout verification against MSVC
 
 ## Requirements
 

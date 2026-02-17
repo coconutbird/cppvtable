@@ -213,3 +213,64 @@ fn test_rtti_cast_to_simulation() {
         assert_eq!(second_ptr, expected_ptr);
     }
 }
+
+#[test]
+fn test_cast_to_and_call_methods() {
+    use cppvtable::rtti::{InterfaceInfo, TypeInfo};
+
+    let interfaces: &'static [InterfaceInfo] = Box::leak(Box::new([
+        MultiImpl::INTERFACE_INFO_I_FIRST,
+        MultiImpl::INTERFACE_INFO_I_SECOND,
+    ]));
+
+    let type_info = TypeInfo::new(1, "MultiImpl", interfaces);
+
+    let obj = MultiImpl::new(42);
+    let obj_ptr = &obj as *const MultiImpl as *const c_void;
+
+    unsafe {
+        // Cast to IFirst and call methods through it
+        let first_ptr = type_info.cast_to(obj_ptr, IFirst::interface_id_ptr());
+        assert!(!first_ptr.is_null());
+        let first_ref = IFirst::from_ptr_mut(first_ptr as *mut c_void);
+        assert_eq!(first_ref.first_method(), 100);
+        assert_eq!(first_ref.first_value(), 42);
+
+        // Cast to ISecond and call methods through it
+        let second_ptr = type_info.cast_to(obj_ptr, ISecond::interface_id_ptr());
+        assert!(!second_ptr.is_null());
+        let second_ref = ISecond::from_ptr_mut(second_ptr as *mut c_void);
+        assert_eq!(second_ref.second_method(), 200);
+        assert_eq!(second_ref.second_value(), 84); // 42 * 2
+    }
+}
+
+/// Third interface - not implemented by MultiImpl
+#[cpp_interface]
+pub trait IThird {
+    fn third_method(&self) -> i32;
+}
+
+#[test]
+fn test_cast_to_unimplemented_returns_null() {
+    use cppvtable::rtti::{InterfaceInfo, TypeInfo};
+
+    let interfaces: &'static [InterfaceInfo] = Box::leak(Box::new([
+        MultiImpl::INTERFACE_INFO_I_FIRST,
+        MultiImpl::INTERFACE_INFO_I_SECOND,
+    ]));
+
+    let type_info = TypeInfo::new(1, "MultiImpl", interfaces);
+
+    let obj = MultiImpl::new(42);
+    let obj_ptr = &obj as *const MultiImpl as *const c_void;
+
+    unsafe {
+        // Cast to IThird should return null since MultiImpl doesn't implement it
+        let third_ptr = type_info.cast_to(obj_ptr, IThird::interface_id_ptr());
+        assert!(third_ptr.is_null());
+    }
+
+    // implements() should also return false
+    assert!(!type_info.implements(IThird::interface_id_ptr()));
+}

@@ -180,3 +180,220 @@ impl<T> VTableWithRtti<T> {
         &self.methods
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Test interface IDs (unique static addresses)
+    static IID_FIRST: u8 = 0;
+    static IID_SECOND: u8 = 0;
+    static IID_THIRD: u8 = 0;
+
+    fn first_id() -> *const u8 {
+        &IID_FIRST
+    }
+    fn second_id() -> *const u8 {
+        &IID_SECOND
+    }
+    fn third_id() -> *const u8 {
+        &IID_THIRD
+    }
+
+    #[test]
+    fn test_interface_info_new() {
+        let info = InterfaceInfo::new(first_id(), 8);
+        assert!(std::ptr::eq(info.interface_id, first_id()));
+        assert_eq!(info.offset, 8);
+    }
+
+    #[test]
+    fn test_interface_info_zero_offset() {
+        let info = InterfaceInfo::new(first_id(), 0);
+        assert_eq!(info.offset, 0);
+    }
+
+    #[test]
+    fn test_interface_info_debug() {
+        let info = InterfaceInfo::new(first_id(), 16);
+        let debug_str = format!("{:?}", info);
+        assert!(debug_str.contains("InterfaceInfo"));
+        assert!(debug_str.contains("offset"));
+        assert!(debug_str.contains("16"));
+    }
+
+    #[test]
+    fn test_type_info_new() {
+        static INTERFACES: [InterfaceInfo; 0] = [];
+        let ti = TypeInfo::new(42, "TestType", &INTERFACES);
+        assert_eq!(ti.type_id, 42);
+        assert_eq!(ti.type_name, "TestType");
+        assert_eq!(ti.interfaces.len(), 0);
+    }
+
+    #[test]
+    fn test_type_info_with_interfaces() {
+        static INTERFACES: [InterfaceInfo; 2] = [
+            InterfaceInfo {
+                interface_id: std::ptr::null(), // Will compare by address anyway
+                offset: 0,
+            },
+            InterfaceInfo {
+                interface_id: std::ptr::null(),
+                offset: 8,
+            },
+        ];
+        let ti = TypeInfo::new(1, "MultiInterface", &INTERFACES);
+        assert_eq!(ti.interfaces.len(), 2);
+        assert_eq!(ti.interfaces[0].offset, 0);
+        assert_eq!(ti.interfaces[1].offset, 8);
+    }
+
+    #[test]
+    fn test_implements_returns_true() {
+        let interfaces: &'static [InterfaceInfo] = Box::leak(Box::new([
+            InterfaceInfo::new(first_id(), 0),
+            InterfaceInfo::new(second_id(), 8),
+        ]));
+        let ti = TypeInfo::new(1, "Test", interfaces);
+
+        assert!(ti.implements(first_id()));
+        assert!(ti.implements(second_id()));
+    }
+
+    #[test]
+    fn test_implements_returns_false_for_unknown() {
+        let interfaces: &'static [InterfaceInfo] = Box::leak(Box::new([
+            InterfaceInfo::new(first_id(), 0),
+            InterfaceInfo::new(second_id(), 8),
+        ]));
+        let ti = TypeInfo::new(1, "Test", interfaces);
+
+        assert!(!ti.implements(third_id()));
+    }
+
+    #[test]
+    fn test_implements_empty_interfaces() {
+        static INTERFACES: [InterfaceInfo; 0] = [];
+        let ti = TypeInfo::new(1, "Empty", &INTERFACES);
+
+        assert!(!ti.implements(first_id()));
+    }
+
+    #[test]
+    fn test_cast_to_primary_interface() {
+        let interfaces: &'static [InterfaceInfo] = Box::leak(Box::new([
+            InterfaceInfo::new(first_id(), 0),
+            InterfaceInfo::new(second_id(), 8),
+        ]));
+        let ti = TypeInfo::new(1, "Test", interfaces);
+
+        let obj: [u8; 24] = [0; 24];
+        let obj_ptr = obj.as_ptr() as *const c_void;
+
+        unsafe {
+            let result = ti.cast_to(obj_ptr, first_id());
+            assert_eq!(result, obj_ptr); // Offset 0, same pointer
+        }
+    }
+
+    #[test]
+    fn test_cast_to_secondary_interface() {
+        let interfaces: &'static [InterfaceInfo] = Box::leak(Box::new([
+            InterfaceInfo::new(first_id(), 0),
+            InterfaceInfo::new(second_id(), 8),
+        ]));
+        let ti = TypeInfo::new(1, "Test", interfaces);
+
+        let obj: [u8; 24] = [0; 24];
+        let obj_ptr = obj.as_ptr() as *const c_void;
+
+        unsafe {
+            let result = ti.cast_to(obj_ptr, second_id());
+            let expected = (obj_ptr as *const u8).offset(8) as *const c_void;
+            assert_eq!(result, expected);
+        }
+    }
+
+    #[test]
+    fn test_cast_to_unknown_returns_null() {
+        let interfaces: &'static [InterfaceInfo] = Box::leak(Box::new([
+            InterfaceInfo::new(first_id(), 0),
+            InterfaceInfo::new(second_id(), 8),
+        ]));
+        let ti = TypeInfo::new(1, "Test", interfaces);
+
+        let obj: [u8; 24] = [0; 24];
+        let obj_ptr = obj.as_ptr() as *const c_void;
+
+        unsafe {
+            let result = ti.cast_to(obj_ptr, third_id());
+            assert!(result.is_null());
+        }
+    }
+
+    #[test]
+    fn test_cast_to_empty_interfaces_returns_null() {
+        static INTERFACES: [InterfaceInfo; 0] = [];
+        let ti = TypeInfo::new(1, "Empty", &INTERFACES);
+
+        let obj: [u8; 24] = [0; 24];
+        let obj_ptr = obj.as_ptr() as *const c_void;
+
+        unsafe {
+            let result = ti.cast_to(obj_ptr, first_id());
+            assert!(result.is_null());
+        }
+    }
+
+    #[test]
+    fn test_type_info_debug() {
+        static INTERFACES: [InterfaceInfo; 0] = [];
+        let ti = TypeInfo::new(99, "DebugTest", &INTERFACES);
+        let debug_str = format!("{:?}", ti);
+        assert!(debug_str.contains("TypeInfo"));
+        assert!(debug_str.contains("DebugTest"));
+        assert!(debug_str.contains("99"));
+    }
+
+    #[test]
+    fn test_vtable_with_rtti_layout() {
+        #[repr(C)]
+        struct FakeVTable {
+            method1: fn(),
+            method2: fn(),
+        }
+
+        fn dummy() {}
+
+        static INTERFACES: [InterfaceInfo; 0] = [];
+        static TYPE_INFO: TypeInfo = TypeInfo::new(1, "Fake", &INTERFACES);
+
+        let vtable = VTableWithRtti::new(
+            &TYPE_INFO,
+            FakeVTable {
+                method1: dummy,
+                method2: dummy,
+            },
+        );
+
+        // The vtable_ptr should point to methods, not rtti
+        let ptr = vtable.vtable_ptr();
+        assert!(!ptr.is_null());
+
+        // RTTI should be at negative offset from methods
+        unsafe {
+            let rtti_ptr = (ptr as *const *const TypeInfo).offset(-1);
+            let rtti = &**rtti_ptr;
+            assert_eq!(rtti.type_name, "Fake");
+        }
+    }
+
+    #[test]
+    fn test_interface_ids_are_unique() {
+        // Each static has a unique address
+        assert!(!std::ptr::eq(first_id(), second_id()));
+        assert!(!std::ptr::eq(second_id(), third_id()));
+        assert!(!std::ptr::eq(first_id(), third_id()));
+    }
+}
