@@ -465,6 +465,12 @@ pub fn implement(attr: TokenStream, item: TokenStream) -> TokenStream {
         interface_name.to_string().to_uppercase()
     );
 
+    // Generate const name matching field naming convention: vtable_i_foo -> VTABLE_I_FOO
+    let vtable_const_name = format_ident!(
+        "{}",
+        vtable_field.to_string().to_uppercase()
+    );
+
     let expanded = quote! {
         // The wrapper functions (private)
         #(#wrapper_fns)*
@@ -474,8 +480,12 @@ pub fn implement(attr: TokenStream, item: TokenStream) -> TokenStream {
             #(#vtable_entries),*
         };
 
-        // Original impl with methods
+        // Original impl with methods + vtable const accessor
         impl #struct_type {
+            /// Pointer to the vtable for this interface implementation.
+            /// Use this when constructing the struct.
+            pub const #vtable_const_name: *const #vtable_name = &#vtable_static_name;
+
             #(#original_methods)*
         }
     };

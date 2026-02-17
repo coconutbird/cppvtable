@@ -144,7 +144,8 @@ define_class! {
 impl Runner {
     pub fn new(speed: f32) -> Self {
         Runner {
-            vtable_i_runnable: std::ptr::null(), // Will be set by implement
+            // Note: Would use Self::VTABLE_I_RUNNABLE if #[implement(IRunnable)] was added
+            vtable_i_runnable: std::ptr::null(),
             speed,
             running: false,
         }
@@ -188,7 +189,7 @@ impl Dog {
 impl Dog {
     pub fn new(name: &str) -> Self {
         let mut dog = Dog {
-            vtable_i_animal: &__DOG_IANIMAL_VTABLE,
+            vtable_i_animal: Self::VTABLE_I_ANIMAL,
             name: [0u8; 32],
         };
         let bytes = name.as_bytes();
@@ -223,7 +224,7 @@ impl Cat {
 impl Cat {
     pub fn new(lives: i32) -> Self {
         Cat {
-            vtable_i_animal: &__CAT_IANIMAL_VTABLE,
+            vtable_i_animal: Self::VTABLE_I_ANIMAL,
             lives,
         }
     }
@@ -288,7 +289,7 @@ impl GearScore {
 impl GearScore {
     pub fn new() -> Self {
         GearScore {
-            vtable_i_gear_score: &__GEARSCORE_IGEARSCORE_VTABLE,
+            vtable_i_gear_score: Self::VTABLE_I_GEAR_SCORE,
             scores: [SCORE_UNCOMPUTED; 2],
             confidence: [1.0; 2],
         }
@@ -334,7 +335,7 @@ impl SlotTester {
 impl SlotTester {
     pub fn new() -> Self {
         SlotTester {
-            vtable_i_slot_test: &__SLOTTESTER_ISLOTTEST_VTABLE,
+            vtable_i_slot_test: Self::VTABLE_I_SLOT_TEST,
         }
     }
 }
@@ -397,24 +398,14 @@ impl Duck {
 impl Duck {
     pub fn new(name: &str) -> Self {
         let mut duck = Duck {
-            vtable_i_swimmer: Duck::vtable_ptr_i_swimmer(),
-            vtable_i_flyer: Duck::vtable_ptr_i_flyer(),
+            vtable_i_swimmer: Self::VTABLE_I_SWIMMER,
+            vtable_i_flyer: Self::VTABLE_I_FLYER,
             name: [0u8; 16],
         };
         let bytes = name.as_bytes();
         let len = bytes.len().min(15);
         duck.name[..len].copy_from_slice(&bytes[..len]);
         duck
-    }
-
-    /// Get vtable pointer for ISwimmer interface
-    pub fn vtable_ptr_i_swimmer() -> *const ISwimmerVTable {
-        &__DUCK_ISWIMMER_VTABLE
-    }
-
-    /// Get vtable pointer for IFlyer interface
-    pub fn vtable_ptr_i_flyer() -> *const IFlyerVTable {
-        &__DUCK_IFLYER_VTABLE
     }
 
     /// Cast to ISwimmer (primary interface at offset 0)
