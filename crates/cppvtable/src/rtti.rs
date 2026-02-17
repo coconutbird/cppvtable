@@ -47,7 +47,10 @@ impl std::fmt::Debug for InterfaceInfo {
 impl InterfaceInfo {
     /// Create a new InterfaceInfo
     pub const fn new(interface_id: *const u8, offset: isize) -> Self {
-        Self { interface_id, offset }
+        Self {
+            interface_id,
+            offset,
+        }
     }
 }
 
@@ -81,7 +84,11 @@ impl TypeInfo {
     ///
     /// # Safety
     /// - `object_ptr` must point to a valid instance of the type this TypeInfo describes
-    pub unsafe fn cast_to(&self, object_ptr: *const c_void, interface_id: *const u8) -> *const c_void {
+    pub unsafe fn cast_to(
+        &self,
+        object_ptr: *const c_void,
+        interface_id: *const u8,
+    ) -> *const c_void {
         for info in self.interfaces {
             if std::ptr::eq(info.interface_id, interface_id) {
                 // SAFETY: Caller guarantees object_ptr is valid and offset is correct for this type
@@ -93,7 +100,9 @@ impl TypeInfo {
 
     /// Check if this type implements a given interface
     pub fn implements(&self, interface_id: *const u8) -> bool {
-        self.interfaces.iter().any(|i| std::ptr::eq(i.interface_id, interface_id))
+        self.interfaces
+            .iter()
+            .any(|i| std::ptr::eq(i.interface_id, interface_id))
     }
 }
 
@@ -144,10 +153,7 @@ pub struct VTableWithRtti<T> {
 impl<T> VTableWithRtti<T> {
     /// Create a new vtable wrapper with RTTI
     pub const fn new(rtti: &'static TypeInfo, methods: T) -> Self {
-        Self {
-            rtti,
-            methods,
-        }
+        Self { rtti, methods }
     }
 
     /// Get a pointer to the methods (what the object's vtable pointer should store)
@@ -155,4 +161,3 @@ impl<T> VTableWithRtti<T> {
         &self.methods
     }
 }
-

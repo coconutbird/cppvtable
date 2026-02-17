@@ -550,7 +550,10 @@ pub fn implement(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Generate RTTI InterfaceInfo const name: IFoo -> INTERFACE_INFO_I_FOO
     let interface_info_const_name = format_ident!(
         "INTERFACE_INFO_{}",
-        vtable_field.to_string().trim_start_matches("vtable_").to_uppercase()
+        vtable_field
+            .to_string()
+            .trim_start_matches("vtable_")
+            .to_uppercase()
     );
 
     let expanded = quote! {

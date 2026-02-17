@@ -151,11 +151,20 @@ fn test_multiple_interface_info_consts() {
     let info_second = MultiImpl::INTERFACE_INFO_I_SECOND;
 
     // Different interface IDs
-    assert!(!std::ptr::eq(info_first.interface_id, info_second.interface_id));
+    assert!(!std::ptr::eq(
+        info_first.interface_id,
+        info_second.interface_id
+    ));
 
     // IDs should match respective interfaces
-    assert!(std::ptr::eq(info_first.interface_id, IFirst::interface_id_ptr()));
-    assert!(std::ptr::eq(info_second.interface_id, ISecond::interface_id_ptr()));
+    assert!(std::ptr::eq(
+        info_first.interface_id,
+        IFirst::interface_id_ptr()
+    ));
+    assert!(std::ptr::eq(
+        info_second.interface_id,
+        ISecond::interface_id_ptr()
+    ));
 }
 
 #[test]
@@ -175,7 +184,7 @@ fn test_interface_info_offsets() {
 
 #[test]
 fn test_rtti_cast_to_simulation() {
-    use cppvtable::rtti::{TypeInfo, InterfaceInfo};
+    use cppvtable::rtti::{InterfaceInfo, TypeInfo};
 
     // Manually create TypeInfo for MultiImpl (this would be auto-generated in future)
     let interfaces: &'static [InterfaceInfo] = Box::leak(Box::new([

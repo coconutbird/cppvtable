@@ -1,6 +1,6 @@
 //! Tests for RTTI (Runtime Type Information) system
 
-use cppvtable::rtti::{TypeInfo, InterfaceInfo, VTableWithRtti};
+use cppvtable::rtti::{InterfaceInfo, TypeInfo, VTableWithRtti};
 use std::ffi::c_void;
 
 // Define interface IDs using static addresses (pointer-based for const-compatibility)

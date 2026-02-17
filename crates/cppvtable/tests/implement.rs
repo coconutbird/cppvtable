@@ -192,7 +192,10 @@ fn test_interface_info_const_exists() {
     let info = Counter::INTERFACE_INFO_I_COUNTER;
 
     // interface_id should match ICounter's ID
-    assert!(std::ptr::eq(info.interface_id, ICounter::interface_id_ptr()));
+    assert!(std::ptr::eq(
+        info.interface_id,
+        ICounter::interface_id_ptr()
+    ));
 
     // offset should be 0 (vtable at start of struct)
     assert_eq!(info.offset, 0);
@@ -204,5 +207,8 @@ fn test_interface_info_offset() {
     let info = NamedThing::INTERFACE_INFO_I_NAMED;
 
     // offset should match actual struct layout
-    assert_eq!(info.offset as usize, std::mem::offset_of!(NamedThing, vtable_i_named));
+    assert_eq!(
+        info.offset as usize,
+        std::mem::offset_of!(NamedThing, vtable_i_named)
+    );
 }

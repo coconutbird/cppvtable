@@ -81,4 +81,4 @@ pub use std::sync::atomic::{Ordering, compiler_fence};
 
 // Re-export RTTI types for macro-generated code
 #[doc(hidden)]
-pub use rtti::{TypeInfo, InterfaceInfo};
+pub use rtti::{InterfaceInfo, TypeInfo};
