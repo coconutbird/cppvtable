@@ -447,18 +447,10 @@ fn validate_impl_method(method: &syn::ImplItemFn) -> Result<(), syn::Error> {
 
 /// Validate a trait definition for C++ vtable compatibility
 fn validate_trait(input: &ItemTrait) -> Result<(), syn::Error> {
-    let trait_name = &input.ident;
-
-    // Check for generics on the trait itself
-    if !input.generics.params.is_empty() {
-        return Err(syn::Error::new(
-            input.generics.span(),
-            format!(
-                "trait '{}': generic traits are not supported in C++ vtables",
-                trait_name
-            ),
-        ));
-    }
+    // Note: Generic traits are supported. When a trait has generic type parameters
+    // (e.g., `trait IInArchive<T>`), the generated vtable function pointers will use
+    // `*mut T` instead of `*mut c_void` for type-safe function pointers.
+    // This is useful for COM interfaces where T represents the implementing struct type.
 
     // Validate each method
     for item in &input.items {
@@ -575,6 +567,24 @@ fn cppvtable_internal(config: VTableConfig, input: ItemTrait) -> Result<TokenStr
     let vtable_name = format_ident!("{}VTable", trait_name);
     let vis = &input.vis;
     let x86_cc = config.x86_calling_conv();
+
+    // Extract generics from the trait for generic interface support
+    // When a trait has generic type parameters (e.g., `trait IInArchive<T>`),
+    // the vtable function pointers will use `*mut T` instead of `*mut c_void`
+    let generics = &input.generics;
+    let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
+    let has_type_params = generics.type_params().next().is_some();
+
+    // Determine the self pointer type for vtable function pointers
+    // When generics are present, use *mut T (first type param) for type-safe function pointers
+    // Otherwise, use *mut std::ffi::c_void for compatibility
+    let self_ptr_type = if has_type_params {
+        let first_type_param = generics.type_params().next().unwrap();
+        let t_ident = &first_type_param.ident;
+        quote! { *mut #t_ident }
+    } else {
+        quote! { *mut std::ffi::c_void }
+    };
 
     // Handle base interface inheritance
     // When a base is specified:
@@ -699,9 +709,9 @@ fn cppvtable_internal(config: VTableConfig, input: ItemTrait) -> Result<TokenStr
             let dummy_name = format_ident!("__reserved_slot_{}", current_slot);
             vtable_fields.push(quote! {
                 #[cfg(target_arch = "x86")]
-                pub #dummy_name: unsafe extern #x86_cc fn(this: *mut std::ffi::c_void),
+                pub #dummy_name: unsafe extern #x86_cc fn(this: #self_ptr_type),
                 #[cfg(not(target_arch = "x86"))]
-                pub #dummy_name: unsafe extern "C" fn(this: *mut std::ffi::c_void)
+                pub #dummy_name: unsafe extern "C" fn(this: #self_ptr_type)
             });
             current_slot += 1;
         }
@@ -712,25 +722,27 @@ fn cppvtable_internal(config: VTableConfig, input: ItemTrait) -> Result<TokenStr
         let output = &method.output;
 
         // Generate vtable field (function pointer) using configured calling convention
+        // Uses self_ptr_type: *mut T for generic interfaces, *mut c_void for non-generic
         vtable_fields.push(quote! {
             #[cfg(target_arch = "x86")]
             pub #method_name: unsafe extern #x86_cc fn(
-                this: *mut std::ffi::c_void
+                this: #self_ptr_type
                 #(, #param_names: #param_types)*
             ) #output,
             #[cfg(not(target_arch = "x86"))]
             pub #method_name: unsafe extern "C" fn(
-                this: *mut std::ffi::c_void
+                this: #self_ptr_type
                 #(, #param_names: #param_types)*
             ) #output
         });
 
         // Generate wrapper method on the base struct
+        // Cast self to the appropriate pointer type (c_void or T)
         wrapper_methods.push(quote! {
             #[inline]
             pub unsafe fn #method_name(&mut self #(, #param_names: #param_types)*) #output {
                 ((*self.vtable).#method_name)(
-                    self as *mut Self as *mut std::ffi::c_void
+                    self as *mut Self as #self_ptr_type
                     #(, #param_names)*
                 )
             }
@@ -819,12 +831,12 @@ fn cppvtable_internal(config: VTableConfig, input: ItemTrait) -> Result<TokenStr
         quote! { #own_slot_count }
     };
 
-    // Generate vtable struct with optional base field
+    // Generate vtable struct with optional base field and generic parameters
     let vtable_struct = if let Some(ref base_field) = base_vtable_field {
         quote! {
             /// VTable struct for #trait_name
             #[repr(C)]
-            #vis struct #vtable_name {
+            #vis struct #vtable_name #impl_generics #where_clause {
                 #base_field,
                 #(#vtable_fields),*
             }
@@ -833,7 +845,7 @@ fn cppvtable_internal(config: VTableConfig, input: ItemTrait) -> Result<TokenStr
         quote! {
             /// VTable struct for #trait_name
             #[repr(C)]
-            #vis struct #vtable_name {
+            #vis struct #vtable_name #impl_generics #where_clause {
                 #(#vtable_fields),*
             }
         }
@@ -1057,6 +1069,13 @@ fn cppvtable_internal(config: VTableConfig, input: ItemTrait) -> Result<TokenStr
         )
     };
 
+    // Generate PhantomData field for generic interfaces to avoid unused type parameter errors
+    let phantom_field = if has_type_params {
+        quote! { _phantom: std::marker::PhantomData #type_generics, }
+    } else {
+        quote! {}
+    };
+
     let expanded = quote! {
         #iid_definition
 
@@ -1064,17 +1083,18 @@ fn cppvtable_internal(config: VTableConfig, input: ItemTrait) -> Result<TokenStr
 
         /// Base struct representing the interface pointer
         #[repr(C)]
-        #vis struct #trait_name {
-            vtable: *const #vtable_name,
+        #vis struct #trait_name #impl_generics #where_clause {
+            vtable: *const #vtable_name #type_generics,
+            #phantom_field
         }
 
-        impl #trait_name {
+        impl #impl_generics #trait_name #type_generics #where_clause {
             #iid_methods
 
             /// Get the vtable
             #[inline]
             #[must_use]
-            pub fn vtable(&self) -> &#vtable_name {
+            pub fn vtable(&self) -> &#vtable_name #type_generics {
                 unsafe { &*self.vtable }
             }
 
@@ -1087,7 +1107,7 @@ fn cppvtable_internal(config: VTableConfig, input: ItemTrait) -> Result<TokenStr
             /// - The caller is responsible for ensuring the lifetime `'a` is valid
             /// - No mutable references to the same object may exist concurrently
             #[inline]
-            pub unsafe fn from_ptr<'a>(ptr: *mut std::ffi::c_void) -> &'a Self {
+            pub unsafe fn from_ptr<'a>(ptr: #self_ptr_type) -> &'a Self {
                 std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
                 let ptr = std::ptr::read_volatile(&ptr);
                 &*(ptr as *const Self)
@@ -1102,7 +1122,7 @@ fn cppvtable_internal(config: VTableConfig, input: ItemTrait) -> Result<TokenStr
             /// - The caller is responsible for ensuring the lifetime `'a` is valid
             /// - No other references to the same object may exist concurrently
             #[inline]
-            pub unsafe fn from_ptr_mut<'a>(ptr: *mut std::ffi::c_void) -> &'a mut Self {
+            pub unsafe fn from_ptr_mut<'a>(ptr: #self_ptr_type) -> &'a mut Self {
                 std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
                 let ptr = std::ptr::read_volatile(&ptr);
                 &mut *(ptr as *mut Self)
@@ -1113,9 +1133,9 @@ fn cppvtable_internal(config: VTableConfig, input: ItemTrait) -> Result<TokenStr
             #(#wrapper_methods)*
         }
 
-        impl #krate::VTableLayout for #trait_name {
+        impl #impl_generics #krate::VTableLayout for #trait_name #type_generics #where_clause {
             const SLOT_COUNT: usize = #slot_count_expr;
-            type VTable = #vtable_name;
+            type VTable = #vtable_name #type_generics;
         }
 
         #forwarders_macro

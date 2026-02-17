@@ -214,3 +214,99 @@ fn test_derived_interface_extends_calculator() {
         6 * ptr_size
     );
 }
+
+// =============================================================================
+// Test: Generic COM interface support (Issue #2)
+// =============================================================================
+
+use cppvtable::com::HRESULT;
+
+/// Generic COM interface for archive readers
+/// The type parameter T represents the implementing struct type
+#[com_interface("23170f69-40c1-278a-0000-000600600000")]
+pub trait IInArchive<T> {
+    fn open(&mut self, stream: *mut c_void) -> HRESULT;
+    fn close(&mut self) -> HRESULT;
+}
+
+#[test]
+fn test_generic_interface_vtable_has_typed_this() {
+    // IInArchiveVTable<T> should be generic
+    // It should have IUnknown base (3 ptrs) + 2 methods = 5 function pointers
+    let ptr_size = std::mem::size_of::<*const c_void>();
+
+    // Test with a concrete type
+    struct MyArchive;
+    assert_eq!(
+        std::mem::size_of::<IInArchiveVTable<MyArchive>>(),
+        5 * ptr_size
+    );
+}
+
+#[test]
+fn test_generic_interface_iid() {
+    // IID should still be a constant (not dependent on type parameter)
+    assert_eq!(IID_IINARCHIVE.data1, 0x23170f69);
+    assert_eq!(IID_IINARCHIVE.data2, 0x40c1);
+    assert_eq!(IID_IINARCHIVE.data3, 0x278a);
+}
+
+#[test]
+fn test_generic_interface_wrapper_struct() {
+    // IInArchive<T> wrapper struct should exist and be the right size
+    struct MyArchive;
+
+    // The wrapper struct has: vtable pointer + PhantomData
+    // PhantomData is zero-sized, so total is just pointer size
+    let ptr_size = std::mem::size_of::<*const c_void>();
+    assert_eq!(std::mem::size_of::<IInArchive<MyArchive>>(), ptr_size);
+}
+
+#[test]
+fn test_generic_interface_vtable_layout() {
+    struct MyArchive;
+
+    // VTableLayout should work with the generic interface
+    assert_eq!(<IInArchive<MyArchive> as VTableLayout>::SLOT_COUNT, 5);
+}
+
+/// Test that vtable function pointers use *mut T instead of *mut c_void
+#[test]
+fn test_generic_vtable_function_pointer_types() {
+    struct PluginHandler {
+        _refcount: u32,
+    }
+
+    // Create a mock vtable with correctly typed function pointers
+    // These must be extern "C" and unsafe to match the vtable signature
+    unsafe extern "C" fn mock_open(_this: *mut PluginHandler, _stream: *mut c_void) -> HRESULT {
+        S_OK
+    }
+    unsafe extern "C" fn mock_close(_this: *mut PluginHandler) -> HRESULT {
+        S_OK
+    }
+    unsafe extern "C" fn mock_query_interface(
+        _this: *mut c_void,
+        _riid: *const cppvtable::com::GUID,
+        _ppv: *mut *mut c_void,
+    ) -> HRESULT {
+        S_OK
+    }
+    unsafe extern "C" fn mock_add_ref(_this: *mut c_void) -> u32 {
+        1
+    }
+    unsafe extern "C" fn mock_release(_this: *mut c_void) -> u32 {
+        0
+    }
+
+    // This should compile because vtable expects fn(*mut PluginHandler, ...)
+    let _vtable: IInArchiveVTable<PluginHandler> = IInArchiveVTable {
+        base: IUnknownVTable {
+            query_interface: mock_query_interface,
+            add_ref: mock_add_ref,
+            release: mock_release,
+        },
+        open: mock_open,
+        close: mock_close,
+    };
+}
