@@ -31,9 +31,9 @@
 //!
 //! ## Proc-macros (`proc` module)
 //! ```ignore
-//! use vtable::proc::*;
+//! use cppvtable::proc::*;
 //!
-//! #[cpp_interface]
+//! #[cppvtable]
 //! pub trait IAnimal {
 //!     fn speak(&self);
 //!     fn legs(&self) -> i32;
@@ -45,7 +45,7 @@
 //!     name: [u8; 32],
 //! }
 //!
-//! #[implement(IAnimal)]
+//! #[cppvtable_impl(IAnimal)]
 //! impl Dog {
 //!     fn speak(&self) { println!("Woof!"); }
 //!     fn legs(&self) -> i32 { 4 }
@@ -68,7 +68,7 @@ pub mod rtti;
 
 /// Proc-macro approach - re-exports from cppvtable-macro crate
 pub mod proc {
-    pub use cppvtable_macro::{cpp_interface, implement};
+    pub use cppvtable_macro::{cppvtable, cppvtable_impl};
 }
 
 // Re-export paste for use by declarative macros

@@ -1,10 +1,10 @@
-//! Tests for #[cpp_interface] attribute
+//! Tests for #[cppvtable] attribute
 
-use cppvtable::proc::cpp_interface;
+use cppvtable::proc::cppvtable;
 use std::ffi::c_void;
 
 /// Basic interface with two methods
-#[cpp_interface]
+#[cppvtable]
 pub trait IBasic {
     fn get_value(&self) -> i32;
     fn set_value(&mut self, val: i32);
@@ -68,7 +68,7 @@ fn test_repr_c_layout() {
 }
 
 /// Interface with various return types
-#[cpp_interface]
+#[cppvtable]
 pub trait IReturnTypes {
     fn returns_nothing(&self);
     fn returns_i32(&self) -> i32;
@@ -88,7 +88,7 @@ fn test_various_return_types() {
 }
 
 /// Interface with parameters
-#[cpp_interface]
+#[cppvtable]
 pub trait IWithParams {
     fn no_params(&self);
     fn one_param(&self, a: i32);
@@ -105,7 +105,7 @@ fn test_methods_with_params() {
 }
 
 /// Interface with mutable self
-#[cpp_interface]
+#[cppvtable]
 pub trait IMutable {
     fn get(&self) -> i32;
     fn set(&mut self, val: i32);

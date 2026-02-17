@@ -8,7 +8,7 @@
 #![recursion_limit = "512"]
 
 use cpp::cpp;
-use cppvtable::proc::{cpp_interface, implement};
+use cppvtable::proc::{cppvtable, cppvtable_impl};
 use std::ffi::c_void;
 
 #[cfg(test)]
@@ -189,7 +189,7 @@ fn cpp_call_fly_speed(flyer: *mut c_void) -> i32 {
 // Rust interface matching C++ ICppAnimal
 // =============================================================================
 
-#[cpp_interface]
+#[cppvtable]
 pub trait IAnimal {
     fn speak(&self);
     fn legs(&self) -> i32;
@@ -199,13 +199,13 @@ pub trait IAnimal {
 // Multiple inheritance interfaces
 // =============================================================================
 
-#[cpp_interface]
+#[cppvtable]
 pub trait ISwimmer {
     fn swim_speed(&self) -> i32;
     fn swim(&self);
 }
 
-#[cpp_interface]
+#[cppvtable]
 pub trait IFlyer {
     fn fly_speed(&self) -> i32;
     fn fly(&self);
@@ -219,7 +219,7 @@ pub struct Duck {
     pub speed: i32,
 }
 
-#[implement(ISwimmer)]
+#[cppvtable_impl(ISwimmer)]
 impl Duck {
     fn swim_speed(&self) -> i32 {
         self.speed
@@ -229,7 +229,7 @@ impl Duck {
     }
 }
 
-#[implement(IFlyer)]
+#[cppvtable_impl(IFlyer)]
 impl Duck {
     fn fly_speed(&self) -> i32 {
         self.speed * 2
@@ -259,7 +259,7 @@ pub struct Dog {
     pub name: [u8; 32],
 }
 
-#[implement(IAnimal)]
+#[cppvtable_impl(IAnimal)]
 impl Dog {
     fn speak(&self) {
         let name_len = self.name.iter().position(|&b| b == 0).unwrap_or(32);
@@ -291,7 +291,7 @@ pub struct Cat {
     pub lives: i32,
 }
 
-#[implement(IAnimal)]
+#[cppvtable_impl(IAnimal)]
 impl Cat {
     fn speak(&self) {
         println!("Cat with {} lives says: Meow!", self.lives);

@@ -1,6 +1,6 @@
 //! Tests for declarative macros (define_interface!, define_class!)
 
-use cppvtable::proc::implement;
+use cppvtable::proc::cppvtable_impl;
 use cppvtable::{define_class, define_interface};
 
 // =============================================================================
@@ -55,7 +55,7 @@ define_class! {
     }
 }
 
-#[implement(ISimple)]
+#[cppvtable_impl(ISimple)]
 impl SimpleClass {
     fn get_value(&self) -> i32 {
         self.value
@@ -120,14 +120,14 @@ define_class! {
     }
 }
 
-#[implement(IFirst)]
+#[cppvtable_impl(IFirst)]
 impl MultiClass {
     fn first(&self) -> i32 {
         self.data
     }
 }
 
-#[implement(ISecond)]
+#[cppvtable_impl(ISecond)]
 impl MultiClass {
     fn second(&self) -> i32 {
         self.data * 2

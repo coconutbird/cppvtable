@@ -1,8 +1,8 @@
 //! Procedural macros for C++ vtable interop (MSVC ABI)
 //!
 //! Provides:
-//! - `#[cpp_interface]` - Define a C++ interface (generates vtable struct)
-//! - `#[implement(Interface)]` - Implement an interface for a struct
+//! - `#[cppvtable]` - Define a C++ interface (generates vtable struct)
+//! - `#[cppvtable_impl(Interface)]` - Implement an interface for a struct
 //!
 //! Automatically selects calling convention based on target:
 //! - x86: `thiscall` (this in ECX)
@@ -13,8 +13,8 @@
 //! ## RTTI Support
 //!
 //! Both macros generate RTTI (Runtime Type Information) compatible with MSVC/Itanium ABI:
-//! - `#[cpp_interface]` generates a unique interface ID
-//! - `#[implement]` generates TypeInfo with interface offsets for this-adjustment
+//! - `#[cppvtable]` generates a unique interface ID
+//! - `#[cppvtable_impl]` generates TypeInfo with interface offsets for this-adjustment
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -31,7 +31,7 @@ use syn::{
 /// There are two ways to specify slot indices:
 ///
 /// 1. **Direct proc-macro usage**: `#[slot(N)]`
-///    Used when applying `#[cpp_interface]` or `#[implement]` directly to code.
+///    Used when applying `#[cppvtable]` or `#[cppvtable_impl]` directly to code.
 ///
 /// 2. **Via declarative macros**: `#[doc(alias = "__slot:N")]`
 ///    The `define_interface!` macro converts `[N] fn method()` syntax to this form.
@@ -131,8 +131,8 @@ fn interface_to_field_name(interface: &Ident) -> Ident {
     format_ident!("{}", result)
 }
 
-/// Internal implementation of cpp_interface
-fn cpp_interface_impl(attr: TokenStream, input: ItemTrait) -> Result<TokenStream2, syn::Error> {
+/// Internal implementation of cppvtable
+fn cppvtable_internal(attr: TokenStream, input: ItemTrait) -> Result<TokenStream2, syn::Error> {
     let trait_name = &input.ident;
     let vtable_name = format_ident!("{}VTable", trait_name);
     let vis = &input.vis;
@@ -374,7 +374,7 @@ fn cpp_interface_impl(attr: TokenStream, input: ItemTrait) -> Result<TokenStream
 ///
 /// # Example
 /// ```ignore
-/// #[cpp_interface]
+/// #[cppvtable]
 /// pub trait IAnimal {
 ///     fn speak(&self);           // slot 0
 ///     #[slot(5)]
@@ -383,16 +383,16 @@ fn cpp_interface_impl(attr: TokenStream, input: ItemTrait) -> Result<TokenStream
 /// }
 /// ```
 #[proc_macro_attribute]
-pub fn cpp_interface(attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn cppvtable(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemTrait);
-    match cpp_interface_impl(attr, input) {
+    match cppvtable_internal(attr, input) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }
 }
 
-/// Internal implementation of implement
-fn implement_impl(interface_name: Ident, input: ItemImpl) -> Result<TokenStream2, syn::Error> {
+/// Internal implementation of cppvtable_impl
+fn cppvtable_impl_impl(interface_name: Ident, input: ItemImpl) -> Result<TokenStream2, syn::Error> {
     let struct_type = &input.self_ty;
     let vtable_name = format_ident!("{}VTable", interface_name);
 
@@ -632,11 +632,11 @@ fn implement_impl(interface_name: Ident, input: ItemImpl) -> Result<TokenStream2
 /// - A `new()` helper or vtable accessor
 ///
 /// Supports `#[slot(N)]` attribute to specify explicit vtable slot indices.
-/// Must match the slot indices used in the corresponding `#[cpp_interface]`.
+/// Must match the slot indices used in the corresponding `#[cppvtable]`.
 ///
 /// # Example
 /// ```ignore
-/// #[implement(IAnimal)]
+/// #[cppvtable_impl(IAnimal)]
 /// impl Dog {
 ///     fn speak(&self) { println!("Woof!"); }  // slot 0
 ///     #[slot(5)]
@@ -645,10 +645,10 @@ fn implement_impl(interface_name: Ident, input: ItemImpl) -> Result<TokenStream2
 /// }
 /// ```
 #[proc_macro_attribute]
-pub fn implement(attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn cppvtable_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let interface_name = parse_macro_input!(attr as Ident);
     let input = parse_macro_input!(item as ItemImpl);
-    match implement_impl(interface_name, input) {
+    match cppvtable_impl_impl(interface_name, input) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }

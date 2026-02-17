@@ -1,0 +1,16 @@
+Rename proc-macro attributes to avoid naming conflicts
+
+Renamed attributes to be crate-namespaced:
+- #[cpp_interface] -> #[cppvtable]
+- #[implement(Interface)] -> #[cppvtable_impl(Interface)]
+
+This avoids potential naming conflicts with other libraries
+or future Microsoft naming conventions.
+
+Updated all files:
+- crates/cppvtable-macro/src/lib.rs (proc-macro definitions)
+- crates/cppvtable/src/lib.rs (re-exports and docs)
+- crates/cppvtable/src/decl.rs (declarative macro delegation and docs)
+- src/main.rs (example code)
+- crates/cppvtable/tests/*.rs (all test files)
+- crates/cppvtable-cpp-tests/src/lib.rs (C++ interop tests)

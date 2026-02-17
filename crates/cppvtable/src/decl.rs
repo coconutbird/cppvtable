@@ -5,7 +5,7 @@
 //! offering a nicer API for common cases.
 //!
 //! # Features
-//! - `define_interface!` - Define vtable layouts (delegates to `#[cpp_interface]`)
+//! - `define_interface!` - Define vtable layouts (delegates to `#[cppvtable]`)
 //! - `define_class!` - Define classes with vtable pointers and helper methods
 //! - Explicit slot indices: `[N] fn method(...);` (becomes `#[slot(N)]`)
 //!
@@ -27,7 +27,7 @@
 
 /// Define a C++ compatible interface with vtable.
 ///
-/// This macro expands to `#[cpp_interface] pub trait ...` and lets the
+/// This macro expands to `#[cppvtable] pub trait ...` and lets the
 /// proc-macro handle all code generation.
 ///
 /// # Syntax
@@ -72,7 +72,7 @@ macro_rules! define_interface {
     };
 
     // Collect: method with explicit slot [N]
-    // Stores slot info to pass via cpp_interface attribute argument
+    // Stores slot info to pass via cppvtable attribute argument
     (@collect $name:ident, [$($meta:tt)*], {
         $(#[$method_meta:meta])*
         [$slot:expr] fn $method:ident (&self $(, $pname:ident : $pty:ty)*) $(-> $ret:ty)?;
@@ -120,19 +120,19 @@ macro_rules! define_interface {
         ], [$($slots)*]);
     };
 
-    // Terminal: emit the trait with cpp_interface attribute (with slots)
+    // Terminal: emit the trait with cppvtable attribute (with slots)
     (@collect $name:ident, [$($meta:tt)*], {}, [$({ $($method:tt)* })*], [$($slots:tt)+]) => {
         $($meta)*
-        #[$crate::proc::cpp_interface(slots($($slots)*))]
+        #[$crate::proc::cppvtable(slots($($slots)*))]
         pub trait $name {
             $($($method)*)*
         }
     };
 
-    // Terminal: emit the trait with cpp_interface attribute (no slots)
+    // Terminal: emit the trait with cppvtable attribute (no slots)
     (@collect $name:ident, [$($meta:tt)*], {}, [$({ $($method:tt)* })*], []) => {
         $($meta)*
-        #[$crate::proc::cpp_interface]
+        #[$crate::proc::cppvtable]
         pub trait $name {
             $($($method)*)*
         }
@@ -142,7 +142,7 @@ macro_rules! define_interface {
 /// Define a C++ compatible class with vtable pointer(s).
 ///
 /// This generates the struct with proper vtable fields and helper methods
-/// for casting to interfaces. Use `#[implement(Interface)]` separately
+/// for casting to interfaces. Use `#[cppvtable_impl(Interface)]` separately
 /// to provide the method implementations.
 ///
 /// # Single Inheritance
@@ -154,7 +154,7 @@ macro_rules! define_interface {
 ///     }
 /// }
 ///
-/// #[implement(IAnimal)]
+/// #[cppvtable_impl(IAnimal)]
 /// impl Dog {
 ///     fn speak(&self) { println!("Woof!"); }
 ///     fn legs(&self) -> i32 { 4 }
@@ -169,12 +169,12 @@ macro_rules! define_interface {
 ///     }
 /// }
 ///
-/// #[implement(ISwimmer)]
+/// #[cppvtable_impl(ISwimmer)]
 /// impl Duck {
 ///     fn swim(&self) { }
 /// }
 ///
-/// #[implement(IFlyer)]
+/// #[cppvtable_impl(IFlyer)]
 /// impl Duck {
 ///     fn fly(&self) { }
 /// }

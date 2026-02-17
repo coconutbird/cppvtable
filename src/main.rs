@@ -2,7 +2,7 @@
 //!
 //! This demonstrates two approaches:
 //! 1. Declarative macros: `define_interface!` and `define_class!`
-//! 2. Proc-macros: `#[cpp_interface]` and `#[implement]`
+//! 2. Proc-macros: `#[cppvtable]` and `#[cppvtable_impl]`
 //!
 //! Also includes C++ interop tests using the `cpp` crate to verify
 //! vtable layout compatibility with actual MSVC-compiled C++ code.
@@ -142,7 +142,7 @@ define_class! {
 }
 
 // Implement the IRunnable interface for Runner
-#[cppvtable::proc::implement(IRunnable)]
+#[cppvtable::proc::cppvtable_impl(IRunnable)]
 impl Runner {
     fn run(&mut self) {
         self.running = true;
@@ -166,13 +166,13 @@ impl Runner {
 }
 
 // =============================================================================
-// APPROACH 2: Proc-macros (#[cpp_interface] / #[implement])
+// APPROACH 2: Proc-macros (#[cppvtable] / #[cppvtable_impl])
 // =============================================================================
 
-use cppvtable::proc::{cpp_interface, implement};
+use cppvtable::proc::{cppvtable, cppvtable_impl};
 
 /// Define a C++ interface using proc-macro
-#[cpp_interface]
+#[cppvtable]
 pub trait IAnimal {
     fn speak(&self);
     fn legs(&self) -> i32;
@@ -186,7 +186,7 @@ pub struct Dog {
 }
 
 /// Implement the IAnimal interface for Dog
-#[implement(IAnimal)]
+#[cppvtable_impl(IAnimal)]
 impl Dog {
     fn speak(&self) {
         let name_len = self.name.iter().position(|&b| b == 0).unwrap_or(32);
@@ -223,7 +223,7 @@ pub struct Cat {
     pub lives: i32,
 }
 
-#[implement(IAnimal)]
+#[cppvtable_impl(IAnimal)]
 impl Cat {
     fn speak(&self) {
         println!("Cat with {} lives says: Meow!", self.lives);
@@ -251,7 +251,7 @@ impl Cat {
 // Cached metrics interface (lazy computation pattern)
 // =============================================================================
 
-#[cpp_interface]
+#[cppvtable]
 pub trait ICachedMetrics {
     fn destructor(&mut self, flags: u8) -> *mut c_void;
     fn get_metric(&mut self, metric_type: i32, param: i32, confidence_out: *mut f32) -> f32;
@@ -267,7 +267,7 @@ pub struct CachedMetrics {
     pub confidence: [f32; 2],
 }
 
-#[implement(ICachedMetrics)]
+#[cppvtable_impl(ICachedMetrics)]
 impl CachedMetrics {
     fn destructor(&mut self, flags: u8) -> *mut c_void {
         println!("CachedMetrics destructor (flags: {})", flags);
@@ -314,7 +314,7 @@ impl CachedMetrics {
 // =============================================================================
 
 /// Interface with explicit slot indices - slots 0, 1, 5, 6
-#[cpp_interface]
+#[cppvtable]
 pub trait ISlotTest {
     fn method_at_0(&self) -> i32; // slot 0
     fn method_at_1(&self) -> i32; // slot 1
@@ -328,7 +328,7 @@ pub struct SlotTester {
     vtable_i_slot_test: *const ISlotTestVTable,
 }
 
-#[implement(ISlotTest)]
+#[cppvtable_impl(ISlotTest)]
 impl SlotTester {
     fn method_at_0(&self) -> i32 {
         0
@@ -358,14 +358,14 @@ impl SlotTester {
 // =============================================================================
 
 /// Interface for things that can swim
-#[cpp_interface]
+#[cppvtable]
 pub trait ISwimmer {
     fn swim(&self);
     fn swim_speed(&self) -> f32;
 }
 
 /// Interface for things that can fly
-#[cpp_interface]
+#[cppvtable]
 pub trait IFlyer {
     fn fly(&self);
     fn fly_altitude(&self) -> f32;
@@ -381,7 +381,7 @@ pub struct Duck {
 }
 
 // Implement ISwimmer for Duck
-#[implement(ISwimmer)]
+#[cppvtable_impl(ISwimmer)]
 impl Duck {
     fn swim(&self) {
         let name = std::str::from_utf8(&self.name)
@@ -395,7 +395,7 @@ impl Duck {
 }
 
 // Implement IFlyer for Duck (separate impl block)
-#[implement(IFlyer)]
+#[cppvtable_impl(IFlyer)]
 impl Duck {
     fn fly(&self) {
         let name = std::str::from_utf8(&self.name)

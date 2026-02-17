@@ -1,10 +1,10 @@
-//! Tests for #[implement] attribute
+//! Tests for #[cppvtable_impl] attribute
 
-use cppvtable::proc::{cpp_interface, implement};
+use cppvtable::proc::{cppvtable, cppvtable_impl};
 use std::ffi::c_void;
 
 /// Simple counter interface
-#[cpp_interface]
+#[cppvtable]
 pub trait ICounter {
     fn get(&self) -> i32;
     fn increment(&mut self);
@@ -18,7 +18,7 @@ pub struct Counter {
     value: i32,
 }
 
-#[implement(ICounter)]
+#[cppvtable_impl(ICounter)]
 impl Counter {
     fn get(&self) -> i32 {
         self.value
@@ -112,7 +112,7 @@ fn test_struct_layout() {
 }
 
 /// Test with a more complex struct
-#[cpp_interface]
+#[cppvtable]
 pub trait INamed {
     fn name_ptr(&self) -> *const u8;
     fn name_len(&self) -> usize;
@@ -125,7 +125,7 @@ pub struct NamedThing {
     len: usize,
 }
 
-#[implement(INamed)]
+#[cppvtable_impl(INamed)]
 impl NamedThing {
     fn name_ptr(&self) -> *const u8 {
         self.name.as_ptr()

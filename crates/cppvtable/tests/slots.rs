@@ -1,11 +1,11 @@
 //! Tests for #[slot(N)] attribute - explicit vtable slot indices
 
-use cppvtable::proc::{cpp_interface, implement};
+use cppvtable::proc::{cppvtable, cppvtable_impl};
 use std::ffi::c_void;
 
 /// Interface with explicit slot indices
 /// Layout: slot 0, slot 1, slots 2-4 reserved, slot 5, slot 6
-#[cpp_interface]
+#[cppvtable]
 pub trait ISlotted {
     fn at_slot_0(&self) -> i32;
     fn at_slot_1(&self) -> i32;
@@ -30,7 +30,7 @@ pub struct SlotTester {
     id: i32,
 }
 
-#[implement(ISlotted)]
+#[cppvtable_impl(ISlotted)]
 impl SlotTester {
     fn at_slot_0(&self) -> i32 {
         0
@@ -84,7 +84,7 @@ fn test_vtable_slot_order() {
 }
 
 /// Test interface starting with non-zero slot
-#[cpp_interface]
+#[cppvtable]
 pub trait IStartsAtThree {
     #[slot(3)]
     fn first_method(&self) -> i32;
@@ -104,7 +104,7 @@ pub struct StartsAtThreeTester {
     vtable_i_starts_at_three: *const IStartsAtThreeVTable,
 }
 
-#[implement(IStartsAtThree)]
+#[cppvtable_impl(IStartsAtThree)]
 impl StartsAtThreeTester {
     #[slot(3)]
     fn first_method(&self) -> i32 {

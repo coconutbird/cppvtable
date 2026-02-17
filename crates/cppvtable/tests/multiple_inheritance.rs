@@ -1,17 +1,17 @@
 //! Tests for multiple inheritance with this-pointer adjustment
 
-use cppvtable::proc::{cpp_interface, implement};
+use cppvtable::proc::{cppvtable, cppvtable_impl};
 use std::ffi::c_void;
 
 /// First interface
-#[cpp_interface]
+#[cppvtable]
 pub trait IFirst {
     fn first_method(&self) -> i32;
     fn first_value(&self) -> i32;
 }
 
 /// Second interface
-#[cpp_interface]
+#[cppvtable]
 pub trait ISecond {
     fn second_method(&self) -> i32;
     fn second_value(&self) -> i32;
@@ -25,7 +25,7 @@ pub struct MultiImpl {
     value: i32,
 }
 
-#[implement(IFirst)]
+#[cppvtable_impl(IFirst)]
 impl MultiImpl {
     fn first_method(&self) -> i32 {
         100
@@ -35,7 +35,7 @@ impl MultiImpl {
     }
 }
 
-#[implement(ISecond)]
+#[cppvtable_impl(ISecond)]
 impl MultiImpl {
     fn second_method(&self) -> i32 {
         200
@@ -246,7 +246,7 @@ fn test_cast_to_and_call_methods() {
 }
 
 /// Third interface - not implemented by MultiImpl
-#[cpp_interface]
+#[cppvtable]
 pub trait IThird {
     fn third_method(&self) -> i32;
 }
