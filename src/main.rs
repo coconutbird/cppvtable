@@ -144,7 +144,7 @@ define_class! {
 impl Runner {
     pub fn new(speed: f32) -> Self {
         Runner {
-            vtable: std::ptr::null(), // Will be set by implement
+            vtable_i_runnable: std::ptr::null(), // Will be set by implement
             speed,
             running: false,
         }

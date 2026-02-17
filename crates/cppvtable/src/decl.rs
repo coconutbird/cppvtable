@@ -1,46 +1,43 @@
 //! Declarative macros for C++ VTable interop (MSVC ABI)
 //!
-//! This module provides `macro_rules!` based macros for defining C++ compatible
-//! interfaces and classes with proper vtable layout matching MSVC ABI.
+//! These macros provide a more concise syntax that delegates to the proc-macros
+//! for actual code generation. This ensures a single implementation while
+//! offering a nicer API for common cases.
 //!
 //! # Features
-//! - `define_interface!` - Define vtable layouts with inheritance support
-//! - `define_class!` - Define classes with multiple inheritance
-//! - Explicit slot indices: `[N] fn method(...);`
-//! - Automatic calling convention selection (thiscall on x86, C on x64)
-//! - RTTI null stub at vtable[-1]
-//! - Passthrough support for hooking scenarios
-
-// Note: Re-exports are in the parent lib.rs, macros use $crate:: paths
-
-/// Calling convention for MSVC ABI
-/// - x86: thiscall (this in ECX)
-/// - x64: standard C calling convention (this as first param)
-// Note: Calling convention is handled via #[cfg] attributes directly in the macro
-// x86: extern "thiscall" - this pointer in ECX
-// x64: extern "C" - this pointer as first argument
+//! - `define_interface!` - Define vtable layouts (delegates to `#[cpp_interface]`)
+//! - `define_class!` - Define classes with vtable pointers and helper methods
+//! - Explicit slot indices: `[N] fn method(...);` (becomes `#[slot(N)]`)
+//!
+//! # Example
+//! ```ignore
+//! define_interface! {
+//!     interface IAnimal {
+//!         fn speak(&self);
+//!         fn legs(&self) -> i32;
+//!     }
+//! }
+//!
+//! define_class! {
+//!     class Dog : IAnimal {
+//!         name: [u8; 32],
+//!     }
+//! }
+//! ```
 
 /// Define a C++ compatible interface with vtable.
 ///
-/// Supports:
-/// - Inheritance: `interface IFoo : IBar { ... }`
-/// - Explicit slot indices: `[0] fn method(...);`
-/// - Mixed implicit/explicit ordering
-/// - RTTI null stub at vtable[-1] (MSVC ABI)
-/// - `from_ptr()` / `from_ptr_mut()` for consuming C++ objects
+/// This macro expands to `#[cpp_interface] pub trait ...` and lets the
+/// proc-macro handle all code generation.
 ///
-/// # Example
+/// # Syntax
 /// ```ignore
 /// define_interface! {
-///     interface IUnknown {
-///         fn query_interface(&self, iid: *const GUID, out: *mut *mut c_void) -> HRESULT;
-///         fn add_ref(&self) -> u32;
-///         fn release(&self) -> u32;
-///     }
-///
-///     interface IAnimal : IUnknown {
-///         fn speak(&self);
-///         [5] fn legs(&self) -> i32;  // explicit slot 5
+///     interface IFoo {
+///         fn method(&self);
+///         fn method_with_ret(&self) -> i32;
+///         fn method_with_args(&self, x: i32, y: f32);
+///         [5] fn explicit_slot(&self);  // explicit slot index
 ///     }
 /// }
 /// ```
@@ -50,7 +47,7 @@ macro_rules! define_interface {
     (
         $(
             $(#[$meta:meta])*
-            interface $name:ident $(: $base:ident)? {
+            interface $name:ident {
                 $($body:tt)*
             }
         )*
@@ -58,229 +55,86 @@ macro_rules! define_interface {
         $(
             $crate::define_interface!(@single
                 $(#[$meta])*
-                interface $name $(: $base)? { $($body)* }
+                interface $name { $($body)* }
             );
         )*
     };
 
-    // Single interface without inheritance
+    // Single interface - collect methods then emit trait
     (@single
         $(#[$meta:meta])*
         interface $name:ident {
             $($body:tt)*
         }
     ) => {
-        $crate::define_interface!(@build $name, [], { $($body)* }, []);
+        $crate::define_interface!(@collect $name, [$(#[$meta])*], { $($body)* }, []);
     };
 
-    // Single interface with single inheritance
-    (@single
-        $(#[$meta:meta])*
-        interface $name:ident : $base:ident {
-            $($body:tt)*
-        }
-    ) => {
-        $crate::define_interface!(@build $name, [$base], { $($body)* }, []);
-    };
-
-    // Build: collect all methods, then generate
-    // Handles [N] fn name(&self, ...);
-    (@build $name:ident, [$($bases:ident),*], {
+    // Collect: method with explicit slot [N]
+    (@collect $name:ident, [$($meta:tt)*], {
         $(#[$method_meta:meta])*
         [$slot:expr] fn $method:ident (&self $(, $pname:ident : $pty:ty)*) $(-> $ret:ty)?;
         $($rest:tt)*
     }, [$($collected:tt)*]) => {
-        $crate::define_interface!(@build $name, [$($bases),*], { $($rest)* }, [
+        $crate::define_interface!(@collect $name, [$($meta)*], { $($rest)* }, [
             $($collected)*
-            {
-                slot: $slot,
-                name: $method,
-                recv: [&self],
-                params: [$(($pname, $pty)),*],
-                ret: ($($ret)?),
-                meta: [$(#[$method_meta])*]
-            }
+            { #[slot($slot)] $(#[$method_meta])* fn $method(&self $(, $pname: $pty)*) $(-> $ret)?; }
         ]);
     };
 
-    // Handles [N] fn name(&mut self, ...);
-    (@build $name:ident, [$($bases:ident),*], {
+    // Collect: method with explicit slot [N] and &mut self
+    (@collect $name:ident, [$($meta:tt)*], {
         $(#[$method_meta:meta])*
         [$slot:expr] fn $method:ident (&mut self $(, $pname:ident : $pty:ty)*) $(-> $ret:ty)?;
         $($rest:tt)*
     }, [$($collected:tt)*]) => {
-        $crate::define_interface!(@build $name, [$($bases),*], { $($rest)* }, [
+        $crate::define_interface!(@collect $name, [$($meta)*], { $($rest)* }, [
             $($collected)*
-            {
-                slot: $slot,
-                name: $method,
-                recv: [&mut self],
-                params: [$(($pname, $pty)),*],
-                ret: ($($ret)?),
-                meta: [$(#[$method_meta])*]
-            }
+            { #[slot($slot)] $(#[$method_meta])* fn $method(&mut self $(, $pname: $pty)*) $(-> $ret)?; }
         ]);
     };
 
-    // Handles fn name(&self, ...); with implicit slot (use _ placeholder, resolved later)
-    (@build $name:ident, [$($bases:ident),*], {
+    // Collect: method without explicit slot (&self)
+    (@collect $name:ident, [$($meta:tt)*], {
         $(#[$method_meta:meta])*
         fn $method:ident (&self $(, $pname:ident : $pty:ty)*) $(-> $ret:ty)?;
         $($rest:tt)*
     }, [$($collected:tt)*]) => {
-        $crate::define_interface!(@build $name, [$($bases),*], { $($rest)* }, [
+        $crate::define_interface!(@collect $name, [$($meta)*], { $($rest)* }, [
             $($collected)*
-            {
-                slot: _,
-                name: $method,
-                recv: [&self],
-                params: [$(($pname, $pty)),*],
-                ret: ($($ret)?),
-                meta: [$(#[$method_meta])*]
-            }
+            { $(#[$method_meta])* fn $method(&self $(, $pname: $pty)*) $(-> $ret)?; }
         ]);
     };
 
-    // Handles fn name(&mut self, ...); with implicit slot
-    (@build $name:ident, [$($bases:ident),*], {
+    // Collect: method without explicit slot (&mut self)
+    (@collect $name:ident, [$($meta:tt)*], {
         $(#[$method_meta:meta])*
         fn $method:ident (&mut self $(, $pname:ident : $pty:ty)*) $(-> $ret:ty)?;
         $($rest:tt)*
     }, [$($collected:tt)*]) => {
-        $crate::define_interface!(@build $name, [$($bases),*], { $($rest)* }, [
+        $crate::define_interface!(@collect $name, [$($meta)*], { $($rest)* }, [
             $($collected)*
-            {
-                slot: _,
-                name: $method,
-                recv: [&mut self],
-                params: [$(($pname, $pty)),*],
-                ret: ($($ret)?),
-                meta: [$(#[$method_meta])*]
-            }
+            { $(#[$method_meta])* fn $method(&mut self $(, $pname: $pty)*) $(-> $ret)?; }
         ]);
     };
 
-    // Terminal: all methods collected, now generate the output
-    (@build $name:ident, [$($bases:ident),*], {}, [$($methods:tt)*]) => {
-        $crate::define_interface!(@generate $name, [$($bases),*], [$($methods)*]);
-    };
-
-
-
-    // Generate the actual structs
-    // For now, simplified version that processes methods directly
-    (@generate $name:ident, [$($bases:ident),*], [$({
-        slot: $slot:tt,
-        name: $method:ident,
-        recv: [$($recv:tt)+],
-        params: [$(($pname:ident, $pty:ty)),*],
-        ret: ($($ret:ty)?),
-        meta: [$($meta:meta)*]
-    })*]) => {
-        $crate::paste! {
-            /// VTable for interface $name
-            /// Note: In MSVC ABI, RTTI pointer would be at offset -1 (not included here)
-            #[repr(C)]
-            pub struct [<$name VTable>] {
-                $(
-                    // Inherit base vtable entries (by embedding)
-                    pub [<__base_ $bases>]: [<$bases VTable>],
-                )*
-                $(
-                    $(#[$meta])*
-                    #[cfg(target_arch = "x86")]
-                    pub $method: unsafe extern "thiscall" fn(
-                        this: *mut $crate::c_void
-                        $(, $pname: $pty)*
-                    ) $(-> $ret)?,
-                    #[cfg(not(target_arch = "x86"))]
-                    pub $method: unsafe extern "C" fn(
-                        this: *mut $crate::c_void
-                        $(, $pname: $pty)*
-                    ) $(-> $ret)?,
-                )*
-            }
-
-            /// Interface pointer struct for $name
-            #[repr(C)]
-            pub struct $name {
-                vtable: *const [<$name VTable>],
-            }
-
-            impl $name {
-                /// Get the vtable
-                #[inline]
-                pub fn vtable(&self) -> &[<$name VTable>] {
-                    unsafe { &*self.vtable }
-                }
-
-                /// Wrap a raw C++ pointer for calling methods.
-                /// Uses compiler fence to prevent optimization issues.
-                #[inline]
-                pub unsafe fn from_ptr<'a>(ptr: *mut $crate::c_void) -> &'a Self {
-                    unsafe {
-                        $crate::compiler_fence($crate::Ordering::SeqCst);
-                        let ptr = ::std::ptr::read_volatile(&ptr);
-                        &*(ptr as *const Self)
-                    }
-                }
-
-                /// Wrap a raw C++ pointer for calling methods (mutable).
-                /// Uses compiler fence to prevent optimization issues.
-                #[inline]
-                pub unsafe fn from_ptr_mut<'a>(ptr: *mut $crate::c_void) -> &'a mut Self {
-                    unsafe {
-                        $crate::compiler_fence($crate::Ordering::SeqCst);
-                        let ptr = ::std::ptr::read_volatile(&ptr);
-                        &mut *(ptr as *mut Self)
-                    }
-                }
-
-                // Generate wrapper methods for each vtable entry
-                $(
-                    $crate::define_interface!(@wrapper_method
-                        $name, $method, [$($recv)+], [$(($pname, $pty)),*], ($($ret)?)
-                    );
-                )*
-            }
-        }
-    };
-
-    // Generate wrapper method for &self
-    (@wrapper_method $name:ident, $method:ident, [& self], [$(($pname:ident, $pty:ty)),*], ($($ret:ty)?)) => {
-        #[inline]
-        pub unsafe fn $method(&self $(, $pname: $pty)*) $(-> $ret)? {
-            unsafe {
-                ((*self.vtable).$method)(
-                    self as *const Self as *mut $crate::c_void
-                    $(, $pname)*
-                )
-            }
-        }
-    };
-
-    // Generate wrapper method for &mut self
-    (@wrapper_method $name:ident, $method:ident, [& mut self], [$(($pname:ident, $pty:ty)),*], ($($ret:ty)?)) => {
-        #[inline]
-        pub unsafe fn $method(&mut self $(, $pname: $pty)*) $(-> $ret)? {
-            unsafe {
-                ((*self.vtable).$method)(
-                    self as *mut Self as *mut $crate::c_void
-                    $(, $pname)*
-                )
-            }
+    // Terminal: emit the trait with cpp_interface attribute
+    (@collect $name:ident, [$($meta:tt)*], {}, [$({ $($method:tt)* })*]) => {
+        $($meta)*
+        #[$crate::proc::cpp_interface]
+        pub trait $name {
+            $($($method)*)*
         }
     };
 }
 
-/// Define a C++ compatible class with vtable(s).
+/// Define a C++ compatible class with vtable pointer(s).
 ///
-/// Supports:
-/// - Single and multiple inheritance
-/// - Automatic vtable pointer fields
-/// - Proper `#[repr(C)]` layout
+/// This generates the struct with proper vtable fields and helper methods
+/// for casting to interfaces. Use `#[implement(Interface)]` separately
+/// to provide the method implementations.
 ///
-/// # Example
+/// # Single Inheritance
 /// ```ignore
 /// define_class! {
 ///     class Dog : IAnimal {
@@ -289,11 +143,29 @@ macro_rules! define_interface {
 ///     }
 /// }
 ///
-/// // Multiple inheritance
+/// #[implement(IAnimal)]
+/// impl Dog {
+///     fn speak(&self) { println!("Woof!"); }
+///     fn legs(&self) -> i32 { 4 }
+/// }
+/// ```
+///
+/// # Multiple Inheritance
+/// ```ignore
 /// define_class! {
-///     class MultiDog : IAnimal, IRunnable {
-///         name: [u8; 32],
+///     class Duck : ISwimmer, IFlyer {
+///         name: [u8; 16],
 ///     }
+/// }
+///
+/// #[implement(ISwimmer)]
+/// impl Duck {
+///     fn swim(&self) { }
+/// }
+///
+/// #[implement(IFlyer)]
+/// impl Duck {
+///     fn fly(&self) { }
 /// }
 /// ```
 #[macro_export]
@@ -313,7 +185,7 @@ macro_rules! define_class {
             #[repr(C)]
             $vis struct $name {
                 /// VTable pointer for $base interface
-                pub vtable: *const [<$base VTable>],
+                pub [<vtable_ $base:snake>]: *const [<$base VTable>],
                 $(
                     $(#[$field_meta])*
                     $field_vis $field_name: $field_ty,
@@ -321,21 +193,15 @@ macro_rules! define_class {
             }
 
             impl $name {
-                /// Get the vtable
+                /// Cast to interface (no adjustment needed for single inheritance)
                 #[inline]
-                pub fn vtable(&self) -> &[<$base VTable>] {
-                    unsafe { &*self.vtable }
-                }
-
-                /// Cast to base interface
-                #[inline]
-                pub fn as_interface(&self) -> &$base {
+                pub fn [<as_ $base:snake>](&self) -> &$base {
                     unsafe { &*(self as *const Self as *const $base) }
                 }
 
-                /// Cast to base interface (mutable)
+                /// Cast to interface (mutable)
                 #[inline]
-                pub fn as_interface_mut(&mut self) -> &mut $base {
+                pub fn [<as_ $base:snake _mut>](&mut self) -> &mut $base {
                     unsafe { &mut *(self as *mut Self as *mut $base) }
                 }
             }
@@ -358,7 +224,7 @@ macro_rules! define_class {
             $vis struct $name {
                 /// VTable pointer for $base1 interface (primary)
                 pub [<vtable_ $base1:snake>]: *const [<$base1 VTable>],
-                /// VTable pointer for $base2 interface (secondary - requires this-adjustment)
+                /// VTable pointer for $base2 interface (secondary)
                 pub [<vtable_ $base2:snake>]: *const [<$base2 VTable>],
                 $(
                     $(#[$field_meta])*
@@ -373,7 +239,7 @@ macro_rules! define_class {
                     unsafe { &*(self as *const Self as *const $base1) }
                 }
 
-                /// Cast to primary interface (mutable, no adjustment needed)
+                /// Cast to primary interface (mutable)
                 #[inline]
                 pub fn [<as_ $base1:snake _mut>](&mut self) -> &mut $base1 {
                     unsafe { &mut *(self as *mut Self as *mut $base1) }
@@ -389,7 +255,62 @@ macro_rules! define_class {
                     }
                 }
 
-                /// Cast to secondary interface (mutable, requires this-adjustment)
+                /// Cast to secondary interface (mutable)
+                #[inline]
+                pub fn [<as_ $base2:snake _mut>](&mut self) -> &mut $base2 {
+                    unsafe {
+                        let ptr = (self as *mut Self as *mut u8)
+                            .add(::std::mem::offset_of!(Self, [<vtable_ $base2:snake>]));
+                        &mut *(ptr as *mut $base2)
+                    }
+                }
+            }
+        }
+    };
+
+    // Three bases
+    (
+        $(#[$meta:meta])*
+        $vis:vis class $name:ident : $base1:ident, $base2:ident, $base3:ident {
+            $(
+                $(#[$field_meta:meta])*
+                $field_vis:vis $field_name:ident : $field_ty:ty
+            ),* $(,)?
+        }
+    ) => {
+        $crate::paste! {
+            $(#[$meta])*
+            #[repr(C)]
+            $vis struct $name {
+                pub [<vtable_ $base1:snake>]: *const [<$base1 VTable>],
+                pub [<vtable_ $base2:snake>]: *const [<$base2 VTable>],
+                pub [<vtable_ $base3:snake>]: *const [<$base3 VTable>],
+                $(
+                    $(#[$field_meta])*
+                    $field_vis $field_name: $field_ty,
+                )*
+            }
+
+            impl $name {
+                #[inline]
+                pub fn [<as_ $base1:snake>](&self) -> &$base1 {
+                    unsafe { &*(self as *const Self as *const $base1) }
+                }
+
+                #[inline]
+                pub fn [<as_ $base1:snake _mut>](&mut self) -> &mut $base1 {
+                    unsafe { &mut *(self as *mut Self as *mut $base1) }
+                }
+
+                #[inline]
+                pub fn [<as_ $base2:snake>](&self) -> &$base2 {
+                    unsafe {
+                        let ptr = (self as *const Self as *const u8)
+                            .add(::std::mem::offset_of!(Self, [<vtable_ $base2:snake>]));
+                        &*(ptr as *const $base2)
+                    }
+                }
+
                 #[inline]
                 pub fn [<as_ $base2:snake _mut>](&mut self) -> &mut $base2 {
                     unsafe {
@@ -399,81 +320,23 @@ macro_rules! define_class {
                     }
                 }
 
-                /// Get offset to secondary interface (for this-adjustment thunks)
                 #[inline]
-                pub const fn [<offset_to_ $base2:snake>]() -> usize {
-                    ::std::mem::offset_of!(Self, [<vtable_ $base2:snake>])
-                }
-            }
-        }
-    };
-
-    // No inheritance (standalone class with custom vtable)
-    (
-        $(#[$meta:meta])*
-        $vis:vis class $name:ident {
-            vtable {
-                $(
-                    $(#[$method_meta:meta])*
-                    fn $method_name:ident (&mut self $(, $arg_name:ident : $arg_ty:ty )*) $(-> $ret_ty:ty)?
-                );* $(;)?
-            }
-
-            $(
-                $(#[$field_meta:meta])*
-                $field_vis:vis $field_name:ident : $field_ty:ty
-            ),* $(,)?
-        }
-    ) => {
-        $crate::paste! {
-            /// VTable struct for $name
-            #[repr(C)]
-            $vis struct [<$name VTable>] {
-                $(
-                    $(#[$method_meta])*
-                    #[cfg(target_arch = "x86")]
-                    pub $method_name: unsafe extern "thiscall" fn(
-                        this: *mut $crate::c_void
-                        $(, $arg_name: $arg_ty)*
-                    ) $(-> $ret_ty)?,
-                    #[cfg(not(target_arch = "x86"))]
-                    pub $method_name: unsafe extern "C" fn(
-                        this: *mut $crate::c_void
-                        $(, $arg_name: $arg_ty)*
-                    ) $(-> $ret_ty)?,
-                )*
-            }
-
-            $(#[$meta])*
-            #[repr(C)]
-            $vis struct $name {
-                /// VTable pointer
-                pub vtable: *const [<$name VTable>],
-                $(
-                    $(#[$field_meta])*
-                    $field_vis $field_name: $field_ty,
-                )*
-            }
-
-            impl $name {
-                /// Get the vtable
-                #[inline]
-                pub fn vtable(&self) -> &[<$name VTable>] {
-                    unsafe { &*self.vtable }
-                }
-
-                $(
-                    /// Call vtable method $method_name
-                    #[inline]
-                    pub unsafe fn $method_name(&mut self $(, $arg_name: $arg_ty)*) $(-> $ret_ty)? {
-                        unsafe {
-                            ((*self.vtable).$method_name)(
-                                self as *mut Self as *mut $crate::c_void
-                                $(, $arg_name)*
-                            )
-                        }
+                pub fn [<as_ $base3:snake>](&self) -> &$base3 {
+                    unsafe {
+                        let ptr = (self as *const Self as *const u8)
+                            .add(::std::mem::offset_of!(Self, [<vtable_ $base3:snake>]));
+                        &*(ptr as *const $base3)
                     }
-                )*
+                }
+
+                #[inline]
+                pub fn [<as_ $base3:snake _mut>](&mut self) -> &mut $base3 {
+                    unsafe {
+                        let ptr = (self as *mut Self as *mut u8)
+                            .add(::std::mem::offset_of!(Self, [<vtable_ $base3:snake>]));
+                        &mut *(ptr as *mut $base3)
+                    }
+                }
             }
         }
     };
