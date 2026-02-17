@@ -3,12 +3,13 @@ members = ["crates/*"]
 resolver = "2"
 
 [package]
-name = "vtables"
+name = "cppvtable-examples"
 version = "0.1.0"
 edition = "2024"
+description = "Examples and tests for cppvtable"
 
 [dependencies]
-vtable = { path = "crates/vtable" }
+cppvtable = { path = "crates/cppvtable" }
 cpp = "0.5"
 
 [build-dependencies]

@@ -1,4 +1,4 @@
-# vtables
+# cppvtable
 
 Rust library for C++ vtable interop with MSVC ABI compatibility.
 
@@ -19,7 +19,7 @@ Define C++ compatible interfaces and classes in Rust that can:
 ### Declarative Macros
 
 ```rust
-use vtable::{define_interface, define_class};
+use cppvtable::{define_interface, define_class};
 
 define_interface! {
     interface IAnimal {
@@ -45,7 +45,7 @@ define_class! {
 ### Proc-Macros
 
 ```rust
-use vtable::proc::{cpp_interface, implement};
+use cppvtable::proc::{cpp_interface, implement};
 
 #[cpp_interface]
 pub trait IAnimal {
@@ -96,15 +96,15 @@ unsafe {
 ## Project Structure
 
 ```
-vtables/
-├── Cargo.toml           # Workspace + binary
+cppvtable/
+├── Cargo.toml           # Workspace + examples binary
 ├── src/main.rs          # Examples and C++ interop tests
 └── crates/
-    ├── vtable/          # Library crate
+    ├── cppvtable/       # Library crate
     │   └── src/
     │       ├── lib.rs   # Re-exports both approaches
     │       └── decl.rs  # Declarative macros
-    └── vtable-macro/    # Proc-macro crate
+    └── cppvtable-macro/ # Proc-macro crate
         └── src/
             └── lib.rs   # #[cpp_interface], #[implement]
 ```

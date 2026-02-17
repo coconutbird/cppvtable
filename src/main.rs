@@ -9,9 +9,9 @@
 
 #![allow(dead_code)]
 
-// Use the vtable crate from crates/vtable
+// Use the cppvtable crate from crates/cppvtable
 // Declarative macros are #[macro_export] so they're at crate root
-use vtable::{define_interface, define_class};
+use cppvtable::{define_interface, define_class};
 
 use cpp::cpp;
 use std::ffi::c_void;
@@ -155,7 +155,7 @@ impl Runner {
 // APPROACH 2: Proc-macros (#[cpp_interface] / #[implement])
 // =============================================================================
 
-use vtable::proc::{cpp_interface, implement};
+use cppvtable::proc::{cpp_interface, implement};
 
 /// Define a C++ interface using proc-macro
 #[cpp_interface]

@@ -1,7 +1,10 @@
 [package]
-name = "vtable-macro"
+name = "cppvtable-macro"
 version = "0.1.0"
 edition = "2024"
+description = "Proc-macros for cppvtable"
+license = "MIT"
+repository = "https://github.com/coconutbird/cppvtable"
 
 [lib]
 proc-macro = true

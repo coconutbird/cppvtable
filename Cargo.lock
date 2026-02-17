@@ -78,6 +78,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "cppvtable"
+version = "0.1.0"
+dependencies = [
+ "cppvtable-macro",
+ "paste",
+]
+
+[[package]]
+name = "cppvtable-examples"
+version = "0.1.0"
+dependencies = [
+ "cpp",
+ "cpp_build",
+ "cppvtable",
+]
+
+[[package]]
+name = "cppvtable-macro"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -176,29 +202,3 @@ name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
-
-[[package]]
-name = "vtable"
-version = "0.1.0"
-dependencies = [
- "paste",
- "vtable-macro",
-]
-
-[[package]]
-name = "vtable-macro"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "vtables"
-version = "0.1.0"
-dependencies = [
- "cpp",
- "cpp_build",
- "vtable",
-]

@@ -1,0 +1,12 @@
+[package]
+name = "cppvtable"
+version = "0.1.0"
+edition = "2024"
+description = "C++ vtable interop for Rust (MSVC ABI compatible)"
+license = "MIT"
+repository = "https://github.com/coconutbird/cppvtable"
+
+[dependencies]
+paste = "1.0"
+cppvtable-macro = { path = "../cppvtable-macro" }
+

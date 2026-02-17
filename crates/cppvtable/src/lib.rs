@@ -54,9 +54,9 @@
 
 pub mod decl;
 
-/// Proc-macro approach - re-exports from vtable-macro crate
+/// Proc-macro approach - re-exports from cppvtable-macro crate
 pub mod proc {
-    pub use vtable_macro::{cpp_interface, implement};
+    pub use cppvtable_macro::{cpp_interface, implement};
 }
 
 // Re-export paste for use by declarative macros
