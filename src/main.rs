@@ -141,11 +141,24 @@ define_class! {
     }
 }
 
+// Implement the IRunnable interface for Runner
+#[cppvtable::proc::implement(IRunnable)]
+impl Runner {
+    fn run(&mut self) {
+        self.running = true;
+        println!("Runner running at speed {}", self.speed);
+    }
+
+    fn stop(&mut self) {
+        self.running = false;
+        println!("Runner stopped");
+    }
+}
+
 impl Runner {
     pub fn new(speed: f32) -> Self {
         Runner {
-            // Note: Would use Self::VTABLE_I_RUNNABLE if #[implement(IRunnable)] was added
-            vtable_i_runnable: std::ptr::null(),
+            vtable_i_runnable: Self::VTABLE_I_RUNNABLE,
             speed,
             running: false,
         }
@@ -245,7 +258,7 @@ pub trait IGearScore {
     fn compute_score(&mut self, score_type: i32, param: i32) -> i32;
 }
 
-const SCORE_UNCOMPUTED: f32 = -3.4028235e38;
+const SCORE_UNCOMPUTED: f32 = f32::MIN;
 
 #[repr(C)]
 pub struct GearScore {

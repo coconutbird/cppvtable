@@ -192,10 +192,7 @@ fn test_interface_info_const_exists() {
     let info = Counter::INTERFACE_INFO_I_COUNTER;
 
     // interface_id should match ICounter's ID
-    assert!(std::ptr::eq(
-        info.interface_id,
-        ICounter::interface_id_ptr()
-    ));
+    assert_eq!(info.interface_id, ICounter::interface_id_ptr());
 
     // offset should be 0 (vtable at start of struct)
     assert_eq!(info.offset, 0);

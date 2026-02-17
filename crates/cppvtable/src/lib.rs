@@ -56,10 +56,12 @@
 //!
 //! | Feature | Declarative | Proc-macro |
 //! |---------|-------------|------------|
-//! | Slot indices `[N]` | ✅ | ❌ (planned) |
-//! | thiscall (x86) | ✅ | ❌ (planned) |
+//! | Slot indices `[N]` / `#[slot(N)]` | ✅ | ✅ |
+//! | thiscall (x86) | ✅ | ✅ |
 //! | Clean Rust syntax | ❌ | ✅ |
 //! | No separate crate | ✅ | N/A |
+//! | RTTI support | ✅ | ✅ |
+//! | Multiple inheritance | ✅ | ✅ |
 
 pub mod decl;
 pub mod rtti;

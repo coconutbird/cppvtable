@@ -17,14 +17,30 @@
 //! - `#[implement]` generates TypeInfo with interface offsets for this-adjustment
 
 use proc_macro::TokenStream;
+use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{
     Attribute, Expr, FnArg, Ident, ImplItem, ItemImpl, ItemTrait, Lit, Meta, Pat, TraitItem, Type,
-    parse_macro_input,
+    parse_macro_input, spanned::Spanned,
 };
 
-/// Parse #[slot(N)] attribute or #[doc(alias = "__slot:N")] from a list of attributes
-/// The doc(alias) form is used by declarative macros since custom attributes are stripped
+/// Parse #[slot(N)] attribute or #[doc(alias = "__slot:N")] from a list of attributes.
+///
+/// # Slot Attribute Mechanism
+///
+/// There are two ways to specify slot indices:
+///
+/// 1. **Direct proc-macro usage**: `#[slot(N)]`
+///    Used when applying `#[cpp_interface]` or `#[implement]` directly to code.
+///
+/// 2. **Via declarative macros**: `#[doc(alias = "__slot:N")]`
+///    The `define_interface!` macro converts `[N] fn method()` syntax to this form.
+///    We use `doc(alias)` as a carrier because custom attributes like `#[slot]` are
+///    stripped by the macro expander before they reach proc-macros. The `doc(alias)`
+///    attribute survives this process, allowing us to pass slot information through.
+///
+/// This dual mechanism allows both the clean proc-macro syntax and the declarative
+/// macro syntax to work with the same underlying implementation.
 fn parse_slot_attr(attrs: &[Attribute]) -> Option<usize> {
     for attr in attrs {
         // Check for #[slot(N)] - direct proc-macro usage
@@ -115,28 +131,8 @@ fn interface_to_field_name(interface: &Ident) -> Ident {
     format_ident!("{}", result)
 }
 
-/// Define a C++ compatible interface.
-///
-/// This generates:
-/// - A vtable struct `{Name}VTable` with function pointers
-/// - A base struct `{Name}` with just the vtable pointer
-///
-/// Supports `#[slot(N)]` attribute to specify explicit vtable slot indices.
-/// Gaps are filled with dummy entries that panic if called.
-///
-/// # Example
-/// ```ignore
-/// #[cpp_interface]
-/// pub trait IAnimal {
-///     fn speak(&self);           // slot 0
-///     #[slot(5)]
-///     fn jump(&self);            // slot 5 (slots 1-4 filled with dummies)
-///     fn legs(&self) -> i32;     // slot 6
-/// }
-/// ```
-#[proc_macro_attribute]
-pub fn cpp_interface(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(item as ItemTrait);
+/// Internal implementation of cpp_interface
+fn cpp_interface_impl(attr: TokenStream, input: ItemTrait) -> Result<TokenStream2, syn::Error> {
     let trait_name = &input.ident;
     let vtable_name = format_ident!("{}VTable", trait_name);
     let vis = &input.vis;
@@ -164,18 +160,24 @@ pub fn cpp_interface(attr: TokenStream, item: TokenStream) -> TokenStream {
             // Check for slot override from attribute, then #[slot(N)] on method
             let slot = if let Some(&explicit_slot) = slot_overrides.get(&method_name.to_string()) {
                 if explicit_slot < next_slot {
-                    panic!(
-                        "slot({}) for method '{}' would overlap with previous slots (next available: {})",
-                        explicit_slot, method_name, next_slot
-                    );
+                    return Err(syn::Error::new(
+                        method_name.span(),
+                        format!(
+                            "slot({}) for method '{}' would overlap with previous slots (next available: {})",
+                            explicit_slot, method_name, next_slot
+                        ),
+                    ));
                 }
                 explicit_slot
             } else if let Some(explicit_slot) = parse_slot_attr(&method.attrs) {
                 if explicit_slot < next_slot {
-                    panic!(
-                        "slot({}) for method '{}' would overlap with previous slots (next available: {})",
-                        explicit_slot, method_name, next_slot
-                    );
+                    return Err(syn::Error::new(
+                        method_name.span(),
+                        format!(
+                            "slot({}) for method '{}' would overlap with previous slots (next available: {})",
+                            explicit_slot, method_name, next_slot
+                        ),
+                    ));
                 }
                 explicit_slot
             } else {
@@ -252,15 +254,14 @@ pub fn cpp_interface(attr: TokenStream, item: TokenStream) -> TokenStream {
         });
 
         // Generate wrapper method on the base struct
+        // Note: The function is already `unsafe fn`, so no inner `unsafe` block needed
         wrapper_methods.push(quote! {
             #[inline]
             pub unsafe fn #method_name(&mut self #(, #param_names: #param_types)*) #output {
-                unsafe {
-                    ((*self.vtable).#method_name)(
-                        self as *mut Self as *mut std::ffi::c_void
-                        #(, #param_names)*
-                    )
-                }
+                ((*self.vtable).#method_name)(
+                    self as *mut Self as *mut std::ffi::c_void
+                    #(, #param_names)*
+                )
             }
         });
 
@@ -291,79 +292,114 @@ pub fn cpp_interface(attr: TokenStream, item: TokenStream) -> TokenStream {
         impl #trait_name {
             /// Get the interface ID pointer for this interface type (const-compatible)
             #[inline]
+            #[must_use]
             pub const fn interface_id_ptr() -> *const u8 {
                 &#iid_static_name as *const u8
             }
 
             /// Get the interface ID for this interface type as usize
             #[inline]
+            #[must_use]
             pub fn interface_id() -> usize {
                 Self::interface_id_ptr() as usize
             }
 
             /// Get the vtable
             #[inline]
+            #[must_use]
             pub fn vtable(&self) -> &#vtable_name {
                 unsafe { &*self.vtable }
             }
 
             /// Wrap a raw C++ pointer for calling methods.
-            /// Uses compiler fence to prevent optimization issues.
+            ///
+            /// # Safety
+            ///
+            /// - `ptr` must point to a valid C++ object with a compatible vtable layout
+            /// - The returned reference must not outlive the underlying C++ object
+            /// - The caller is responsible for ensuring the lifetime `'a` is valid;
+            ///   the C++ object must remain alive and unmoved for the duration of `'a`
+            /// - No mutable references to the same object may exist concurrently
+            ///
+            /// # Implementation Notes
+            ///
+            /// Uses `read_volatile` and `compiler_fence` to prevent the compiler from
+            /// optimizing away the pointer indirection, which is necessary when the
+            /// pointer comes from C++ code that the Rust compiler cannot reason about.
             #[inline]
             pub unsafe fn from_ptr<'a>(ptr: *mut std::ffi::c_void) -> &'a Self {
                 std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
                 let ptr = std::ptr::read_volatile(&ptr);
-                unsafe { &*(ptr as *const Self) }
+                &*(ptr as *const Self)
             }
 
             /// Wrap a raw C++ pointer for calling methods (mutable).
-            /// Uses compiler fence to prevent optimization issues.
+            ///
+            /// # Safety
+            ///
+            /// - `ptr` must point to a valid C++ object with a compatible vtable layout
+            /// - The returned reference must not outlive the underlying C++ object
+            /// - The caller is responsible for ensuring the lifetime `'a` is valid;
+            ///   the C++ object must remain alive and unmoved for the duration of `'a`
+            /// - No other references (mutable or immutable) to the same object may
+            ///   exist concurrently
+            ///
+            /// # Implementation Notes
+            ///
+            /// Uses `read_volatile` and `compiler_fence` to prevent the compiler from
+            /// optimizing away the pointer indirection, which is necessary when the
+            /// pointer comes from C++ code that the Rust compiler cannot reason about.
             #[inline]
             pub unsafe fn from_ptr_mut<'a>(ptr: *mut std::ffi::c_void) -> &'a mut Self {
                 std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
                 let ptr = std::ptr::read_volatile(&ptr);
-                unsafe { &mut *(ptr as *mut Self) }
+                &mut *(ptr as *mut Self)
             }
 
             #(#wrapper_methods)*
         }
     };
 
-    TokenStream::from(expanded)
+    Ok(expanded)
 }
 
-/// Implement a C++ interface for a struct.
+/// Define a C++ compatible interface.
 ///
 /// This generates:
-/// - Static vtable instance
-/// - Wrapper functions that cast `this` and call your methods
-/// - A `new()` helper or vtable accessor
+/// - A vtable struct `{Name}VTable` with function pointers
+/// - A base struct `{Name}` with just the vtable pointer
 ///
 /// Supports `#[slot(N)]` attribute to specify explicit vtable slot indices.
-/// Must match the slot indices used in the corresponding `#[cpp_interface]`.
+/// Gaps are filled with dummy entries that panic if called.
 ///
 /// # Example
 /// ```ignore
-/// #[implement(IAnimal)]
-/// impl Dog {
-///     fn speak(&self) { println!("Woof!"); }  // slot 0
+/// #[cpp_interface]
+/// pub trait IAnimal {
+///     fn speak(&self);           // slot 0
 ///     #[slot(5)]
-///     fn jump(&self) { }                       // slot 5
-///     fn legs(&self) -> i32 { 4 }              // slot 6
+///     fn jump(&self);            // slot 5 (slots 1-4 filled with dummies)
+///     fn legs(&self) -> i32;     // slot 6
 /// }
 /// ```
 #[proc_macro_attribute]
-pub fn implement(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let interface_name = parse_macro_input!(attr as Ident);
-    let input = parse_macro_input!(item as ItemImpl);
+pub fn cpp_interface(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as ItemTrait);
+    match cpp_interface_impl(attr, input) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
 
+/// Internal implementation of implement
+fn implement_impl(interface_name: Ident, input: ItemImpl) -> Result<TokenStream2, syn::Error> {
     let struct_type = &input.self_ty;
     let vtable_name = format_ident!("{}VTable", interface_name);
 
     // Extract struct name for generating identifiers
     let struct_name = match struct_type.as_ref() {
         Type::Path(type_path) => type_path.path.segments.last().unwrap().ident.clone(),
-        _ => panic!("Expected a type path"),
+        _ => return Err(syn::Error::new(struct_type.span(), "Expected a type path")),
     };
 
     // Collect methods with their slot indices
@@ -388,10 +424,13 @@ pub fn implement(attr: TokenStream, item: TokenStream) -> TokenStream {
             // Check for #[slot(N)] attribute
             let slot = if let Some(explicit_slot) = parse_slot_attr(&method.attrs) {
                 if explicit_slot < next_slot {
-                    panic!(
-                        "slot({}) for method '{}' would overlap with previous slots (next available: {})",
-                        explicit_slot, method_name, next_slot
-                    );
+                    return Err(syn::Error::new(
+                        method_name.span(),
+                        format!(
+                            "slot({}) for method '{}' would overlap with previous slots (next available: {})",
+                            explicit_slot, method_name, next_slot
+                        ),
+                    ));
                 }
                 explicit_slot
             } else {
@@ -582,5 +621,35 @@ pub fn implement(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
-    TokenStream::from(expanded)
+    Ok(expanded)
+}
+
+/// Implement a C++ interface for a struct.
+///
+/// This generates:
+/// - Static vtable instance
+/// - Wrapper functions that cast `this` and call your methods
+/// - A `new()` helper or vtable accessor
+///
+/// Supports `#[slot(N)]` attribute to specify explicit vtable slot indices.
+/// Must match the slot indices used in the corresponding `#[cpp_interface]`.
+///
+/// # Example
+/// ```ignore
+/// #[implement(IAnimal)]
+/// impl Dog {
+///     fn speak(&self) { println!("Woof!"); }  // slot 0
+///     #[slot(5)]
+///     fn jump(&self) { }                       // slot 5
+///     fn legs(&self) -> i32 { 4 }              // slot 6
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn implement(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let interface_name = parse_macro_input!(attr as Ident);
+    let input = parse_macro_input!(item as ItemImpl);
+    match implement_impl(interface_name, input) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
 }

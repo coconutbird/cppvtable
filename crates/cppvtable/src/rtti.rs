@@ -103,6 +103,7 @@ impl TypeInfo {
     ///
     /// # Safety
     /// - `object_ptr` must point to a valid instance of the type this TypeInfo describes
+    #[must_use = "cast_to returns the adjusted pointer; discarding it is likely a bug"]
     pub unsafe fn cast_to(
         &self,
         object_ptr: *const c_void,
@@ -118,6 +119,7 @@ impl TypeInfo {
     }
 
     /// Check if this type implements a given interface
+    #[must_use]
     pub fn implements(&self, interface_id: *const u8) -> bool {
         self.interfaces
             .iter()
@@ -251,11 +253,17 @@ mod tests {
 
     #[test]
     fn test_implements_returns_true() {
-        let interfaces: &'static [InterfaceInfo] = Box::leak(Box::new([
-            InterfaceInfo::new(first_id(), 0),
-            InterfaceInfo::new(second_id(), 8),
-        ]));
-        let ti = TypeInfo::new(1, "Test", interfaces);
+        static INTERFACES: [InterfaceInfo; 2] = [
+            InterfaceInfo {
+                interface_id: &IID_FIRST,
+                offset: 0,
+            },
+            InterfaceInfo {
+                interface_id: &IID_SECOND,
+                offset: 8,
+            },
+        ];
+        let ti = TypeInfo::new(1, "Test", &INTERFACES);
 
         assert!(ti.implements(first_id()));
         assert!(ti.implements(second_id()));
@@ -263,11 +271,17 @@ mod tests {
 
     #[test]
     fn test_implements_returns_false_for_unknown() {
-        let interfaces: &'static [InterfaceInfo] = Box::leak(Box::new([
-            InterfaceInfo::new(first_id(), 0),
-            InterfaceInfo::new(second_id(), 8),
-        ]));
-        let ti = TypeInfo::new(1, "Test", interfaces);
+        static INTERFACES: [InterfaceInfo; 2] = [
+            InterfaceInfo {
+                interface_id: &IID_FIRST,
+                offset: 0,
+            },
+            InterfaceInfo {
+                interface_id: &IID_SECOND,
+                offset: 8,
+            },
+        ];
+        let ti = TypeInfo::new(1, "Test", &INTERFACES);
 
         assert!(!ti.implements(third_id()));
     }
@@ -282,11 +296,17 @@ mod tests {
 
     #[test]
     fn test_cast_to_primary_interface() {
-        let interfaces: &'static [InterfaceInfo] = Box::leak(Box::new([
-            InterfaceInfo::new(first_id(), 0),
-            InterfaceInfo::new(second_id(), 8),
-        ]));
-        let ti = TypeInfo::new(1, "Test", interfaces);
+        static INTERFACES: [InterfaceInfo; 2] = [
+            InterfaceInfo {
+                interface_id: &IID_FIRST,
+                offset: 0,
+            },
+            InterfaceInfo {
+                interface_id: &IID_SECOND,
+                offset: 8,
+            },
+        ];
+        let ti = TypeInfo::new(1, "Test", &INTERFACES);
 
         let obj: [u8; 24] = [0; 24];
         let obj_ptr = obj.as_ptr() as *const c_void;
@@ -299,11 +319,17 @@ mod tests {
 
     #[test]
     fn test_cast_to_secondary_interface() {
-        let interfaces: &'static [InterfaceInfo] = Box::leak(Box::new([
-            InterfaceInfo::new(first_id(), 0),
-            InterfaceInfo::new(second_id(), 8),
-        ]));
-        let ti = TypeInfo::new(1, "Test", interfaces);
+        static INTERFACES: [InterfaceInfo; 2] = [
+            InterfaceInfo {
+                interface_id: &IID_FIRST,
+                offset: 0,
+            },
+            InterfaceInfo {
+                interface_id: &IID_SECOND,
+                offset: 8,
+            },
+        ];
+        let ti = TypeInfo::new(1, "Test", &INTERFACES);
 
         let obj: [u8; 24] = [0; 24];
         let obj_ptr = obj.as_ptr() as *const c_void;
@@ -317,11 +343,17 @@ mod tests {
 
     #[test]
     fn test_cast_to_unknown_returns_null() {
-        let interfaces: &'static [InterfaceInfo] = Box::leak(Box::new([
-            InterfaceInfo::new(first_id(), 0),
-            InterfaceInfo::new(second_id(), 8),
-        ]));
-        let ti = TypeInfo::new(1, "Test", interfaces);
+        static INTERFACES: [InterfaceInfo; 2] = [
+            InterfaceInfo {
+                interface_id: &IID_FIRST,
+                offset: 0,
+            },
+            InterfaceInfo {
+                interface_id: &IID_SECOND,
+                offset: 8,
+            },
+        ];
+        let ti = TypeInfo::new(1, "Test", &INTERFACES);
 
         let obj: [u8; 24] = [0; 24];
         let obj_ptr = obj.as_ptr() as *const c_void;
