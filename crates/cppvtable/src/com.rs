@@ -17,6 +17,11 @@
 //!     fn do_something(&self, x: i32) -> HRESULT;
 //! }
 //! ```
+//!
+//! ## Windows Compatibility
+//!
+//! When the `windows-compat` feature is enabled, `GUID` and `HRESULT` are re-exported
+//! from the `windows-core` crate for compatibility with projects using the `windows` crate.
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -25,99 +30,198 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // GUID - Globally Unique Identifier
 // =============================================================================
 
-/// 128-bit globally unique identifier (GUID/UUID/IID).
-///
-/// Used for interface identification in COM. Format: `{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}`
-#[repr(C)]
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct GUID {
-    pub data1: u32,
-    pub data2: u16,
-    pub data3: u16,
-    pub data4: [u8; 8],
-}
+// When windows-compat is enabled, use windows-core types
+#[cfg(feature = "windows-compat")]
+pub use windows_core::GUID;
 
-impl GUID {
-    /// Create a new GUID from components
-    #[must_use]
-    pub const fn new(data1: u32, data2: u16, data3: u16, data4: [u8; 8]) -> Self {
-        Self {
-            data1,
-            data2,
-            data3,
-            data4,
+// When windows-compat is disabled, use our own definition
+#[cfg(not(feature = "windows-compat"))]
+mod guid_impl {
+    /// 128-bit globally unique identifier (GUID/UUID/IID).
+    ///
+    /// Used for interface identification in COM. Format: `{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}`
+    #[repr(C)]
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct GUID {
+        pub data1: u32,
+        pub data2: u16,
+        pub data3: u16,
+        pub data4: [u8; 8],
+    }
+
+    impl GUID {
+        /// Create a new GUID from components
+        #[must_use]
+        pub const fn new(data1: u32, data2: u16, data3: u16, data4: [u8; 8]) -> Self {
+            Self {
+                data1,
+                data2,
+                data3,
+                data4,
+            }
+        }
+
+        /// The nil/zero GUID
+        pub const ZERO: GUID = GUID::new(0, 0, 0, [0; 8]);
+    }
+
+    impl std::fmt::Debug for GUID {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "{{{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}}}",
+                self.data1,
+                self.data2,
+                self.data3,
+                self.data4[0],
+                self.data4[1],
+                self.data4[2],
+                self.data4[3],
+                self.data4[4],
+                self.data4[5],
+                self.data4[6],
+                self.data4[7]
+            )
         }
     }
 
-    /// The nil/zero GUID
-    pub const ZERO: GUID = GUID::new(0, 0, 0, [0; 8]);
-}
-
-impl std::fmt::Debug for GUID {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{{{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}}}",
-            self.data1,
-            self.data2,
-            self.data3,
-            self.data4[0],
-            self.data4[1],
-            self.data4[2],
-            self.data4[3],
-            self.data4[4],
-            self.data4[5],
-            self.data4[6],
-            self.data4[7]
-        )
+    impl std::fmt::Display for GUID {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                self.data1,
+                self.data2,
+                self.data3,
+                self.data4[0],
+                self.data4[1],
+                self.data4[2],
+                self.data4[3],
+                self.data4[4],
+                self.data4[5],
+                self.data4[6],
+                self.data4[7]
+            )
+        }
     }
 }
 
-impl std::fmt::Display for GUID {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            self.data1,
-            self.data2,
-            self.data3,
-            self.data4[0],
-            self.data4[1],
-            self.data4[2],
-            self.data4[3],
-            self.data4[4],
-            self.data4[5],
-            self.data4[6],
-            self.data4[7]
-        )
-    }
+#[cfg(not(feature = "windows-compat"))]
+pub use guid_impl::GUID;
+
+// =============================================================================
+// GUID Helper - for macro-generated code
+// =============================================================================
+
+/// Create a GUID from its components.
+///
+/// This is a const fn helper that works with both the native GUID type
+/// and `windows_core::GUID` when `windows-compat` feature is enabled.
+///
+/// Used by the `#[com_interface]` macro for generating IID constants.
+#[cfg(feature = "windows-compat")]
+#[inline]
+#[must_use]
+pub const fn make_guid(data1: u32, data2: u16, data3: u16, data4: [u8; 8]) -> GUID {
+    GUID::from_values(data1, data2, data3, data4)
+}
+
+/// Create a GUID from its components.
+///
+/// This is a const fn helper that works with both the native GUID type
+/// and `windows_core::GUID` when `windows-compat` feature is enabled.
+///
+/// Used by the `#[com_interface]` macro for generating IID constants.
+#[cfg(not(feature = "windows-compat"))]
+#[inline]
+#[must_use]
+pub const fn make_guid(data1: u32, data2: u16, data3: u16, data4: [u8; 8]) -> GUID {
+    GUID::new(data1, data2, data3, data4)
 }
 
 // =============================================================================
 // HRESULT - COM error codes
 // =============================================================================
 
+// When windows-compat is enabled, re-export HRESULT from windows-core
+#[cfg(feature = "windows-compat")]
+pub use windows_core::HRESULT;
+
+// When windows-compat is disabled, use our own definition
+#[cfg(not(feature = "windows-compat"))]
 /// COM result type. 0 (S_OK) indicates success, negative values indicate errors.
 pub type HRESULT = i32;
 
+// When windows-compat is enabled, use HRESULT as a struct wrapper
+#[cfg(feature = "windows-compat")]
+/// Success
+pub const S_OK: HRESULT = HRESULT(0);
+#[cfg(feature = "windows-compat")]
+/// Success, but returned false
+pub const S_FALSE: HRESULT = HRESULT(1);
+#[cfg(feature = "windows-compat")]
+/// No such interface supported
+pub const E_NOINTERFACE: HRESULT = HRESULT(0x8000_4002_u32 as i32);
+#[cfg(feature = "windows-compat")]
+/// Invalid pointer
+pub const E_POINTER: HRESULT = HRESULT(0x8000_4003_u32 as i32);
+#[cfg(feature = "windows-compat")]
+/// Unspecified failure
+pub const E_FAIL: HRESULT = HRESULT(0x8000_4005_u32 as i32);
+#[cfg(feature = "windows-compat")]
+/// Out of memory
+pub const E_OUTOFMEMORY: HRESULT = HRESULT(0x8007_000E_u32 as i32);
+#[cfg(feature = "windows-compat")]
+/// Invalid argument
+pub const E_INVALIDARG: HRESULT = HRESULT(0x8007_0057_u32 as i32);
+#[cfg(feature = "windows-compat")]
+/// Not implemented
+pub const E_NOTIMPL: HRESULT = HRESULT(0x8000_4001_u32 as i32);
+
+// When windows-compat is disabled, use plain i32 values
+#[cfg(not(feature = "windows-compat"))]
 /// Success
 pub const S_OK: HRESULT = 0;
+#[cfg(not(feature = "windows-compat"))]
 /// Success, but returned false
 pub const S_FALSE: HRESULT = 1;
+#[cfg(not(feature = "windows-compat"))]
 /// No such interface supported
 pub const E_NOINTERFACE: HRESULT = 0x8000_4002_u32 as i32;
+#[cfg(not(feature = "windows-compat"))]
 /// Invalid pointer
 pub const E_POINTER: HRESULT = 0x8000_4003_u32 as i32;
+#[cfg(not(feature = "windows-compat"))]
 /// Unspecified failure
 pub const E_FAIL: HRESULT = 0x8000_4005_u32 as i32;
+#[cfg(not(feature = "windows-compat"))]
 /// Out of memory
 pub const E_OUTOFMEMORY: HRESULT = 0x8007_000E_u32 as i32;
+#[cfg(not(feature = "windows-compat"))]
 /// Invalid argument
 pub const E_INVALIDARG: HRESULT = 0x8007_0057_u32 as i32;
+#[cfg(not(feature = "windows-compat"))]
 /// Not implemented
 pub const E_NOTIMPL: HRESULT = 0x8000_4001_u32 as i32;
 
 /// Check if an HRESULT indicates success (non-negative)
+#[cfg(feature = "windows-compat")]
+#[inline]
+#[must_use]
+pub const fn succeeded(hr: HRESULT) -> bool {
+    hr.0 >= 0
+}
+
+/// Check if an HRESULT indicates failure (negative)
+#[cfg(feature = "windows-compat")]
+#[inline]
+#[must_use]
+pub const fn failed(hr: HRESULT) -> bool {
+    hr.0 < 0
+}
+
+/// Check if an HRESULT indicates success (non-negative)
+#[cfg(not(feature = "windows-compat"))]
 #[inline]
 #[must_use]
 pub const fn succeeded(hr: HRESULT) -> bool {
@@ -125,6 +229,7 @@ pub const fn succeeded(hr: HRESULT) -> bool {
 }
 
 /// Check if an HRESULT indicates failure (negative)
+#[cfg(not(feature = "windows-compat"))]
 #[inline]
 #[must_use]
 pub const fn failed(hr: HRESULT) -> bool {
@@ -136,6 +241,16 @@ pub const fn failed(hr: HRESULT) -> bool {
 // =============================================================================
 
 /// IUnknown interface ID
+#[cfg(feature = "windows-compat")]
+pub const IID_IUNKNOWN: GUID = GUID::from_values(
+    0x00000000,
+    0x0000,
+    0x0000,
+    [0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
+);
+
+/// IUnknown interface ID
+#[cfg(not(feature = "windows-compat"))]
 pub const IID_IUNKNOWN: GUID = GUID::new(
     0x00000000,
     0x0000,

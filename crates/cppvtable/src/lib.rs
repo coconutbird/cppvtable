@@ -122,5 +122,5 @@ pub use rtti::{InterfaceInfo, TypeInfo};
 #[doc(hidden)]
 pub use com::{
     ComRefCount, E_NOINTERFACE, E_POINTER, GUID, HRESULT, IID_IUNKNOWN, IUnknown, IUnknownVTable,
-    S_OK,
+    S_OK, make_guid,
 };

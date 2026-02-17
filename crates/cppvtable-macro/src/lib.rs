@@ -784,14 +784,15 @@ fn cppvtable_internal(config: VTableConfig, input: ItemTrait) -> Result<TokenStr
             let d4_5 = data4[5];
             let d4_6 = data4[6];
             let d4_7 = data4[7];
+            // Use make_guid helper function for windows-compat compatibility
             let def = quote! {
                 /// COM Interface ID (GUID) for this interface
-                #vis const #iid_static_name: #krate::GUID = #krate::GUID {
-                    data1: #data1,
-                    data2: #data2,
-                    data3: #data3,
-                    data4: [#d4_0, #d4_1, #d4_2, #d4_3, #d4_4, #d4_5, #d4_6, #d4_7],
-                };
+                #vis const #iid_static_name: #krate::GUID = #krate::make_guid(
+                    #data1,
+                    #data2,
+                    #data3,
+                    [#d4_0, #d4_1, #d4_2, #d4_3, #d4_4, #d4_5, #d4_6, #d4_7],
+                );
             };
             let methods = quote! {
                 /// Get the interface ID (GUID) for this COM interface
