@@ -92,12 +92,12 @@ unsafe {
 
 ## Feature Comparison
 
-| Feature            | Declarative        | Proc-macro         |
-| ------------------ | ------------------ | ------------------ |
-| Slot indices       | ✅ `[N] fn method` | ✅ `#[slot(N)]`    |
-| thiscall (x86)     | ✅                 | ✅                 |
-| Clean Rust syntax  | ❌                 | ✅                 |
-| No separate crate  | ✅                 | N/A                |
+| Feature           | Declarative        | Proc-macro      |
+| ----------------- | ------------------ | --------------- |
+| Slot indices      | ✅ `[N] fn method` | ✅ `#[slot(N)]` |
+| thiscall (x86)    | ✅                 | ✅              |
+| Clean Rust syntax | ❌                 | ✅              |
+| No separate crate | ✅                 | N/A             |
 
 ## Project Structure
 
@@ -134,6 +134,7 @@ cargo test --workspace
 ```
 
 **Test coverage (75 total):**
+
 - Single & multiple inheritance
 - This-pointer adjustment for secondary interfaces
 - Rust calling C++ objects, C++ calling Rust objects
