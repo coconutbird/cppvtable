@@ -1,22 +1,17 @@
-//! C++ VTable interop macros and utilities for MSVC ABI
+//! Declarative macros for C++ VTable interop (MSVC ABI)
 //!
-//! This module provides macros for defining C++ compatible interfaces and classes
-//! with proper vtable layout matching MSVC ABI.
+//! This module provides `macro_rules!` based macros for defining C++ compatible
+//! interfaces and classes with proper vtable layout matching MSVC ABI.
 //!
 //! # Features
-//! - `cpp_interface!` - Define vtable layouts with inheritance support
-//! - `cpp_class!` - Define classes with multiple inheritance
+//! - `define_interface!` - Define vtable layouts with inheritance support
+//! - `define_class!` - Define classes with multiple inheritance
+//! - Explicit slot indices: `[N] fn method(...);`
 //! - Automatic calling convention selection (thiscall on x86, C on x64)
 //! - RTTI null stub at vtable[-1]
 //! - Passthrough support for hooking scenarios
 
-pub use ::paste::paste;
-
-// Re-export for macro use
-#[doc(hidden)]
-pub use std::ffi::c_void;
-#[doc(hidden)]
-pub use std::sync::atomic::{Ordering, compiler_fence};
+// Note: Re-exports are in the parent lib.rs, macros use $crate:: paths
 
 /// Calling convention for MSVC ABI
 /// - x86: thiscall (this in ECX)
@@ -182,7 +177,7 @@ macro_rules! define_interface {
         ret: ($($ret:ty)?),
         meta: [$($meta:meta)*]
     })*]) => {
-        $crate::vtable::paste! {
+        $crate::paste! {
             /// VTable for interface $name
             /// Note: In MSVC ABI, RTTI pointer would be at offset -1 (not included here)
             #[repr(C)]
@@ -195,12 +190,12 @@ macro_rules! define_interface {
                     $(#[$meta])*
                     #[cfg(target_arch = "x86")]
                     pub $method: unsafe extern "thiscall" fn(
-                        this: *mut $crate::vtable::c_void
+                        this: *mut $crate::c_void
                         $(, $pname: $pty)*
                     ) $(-> $ret)?,
                     #[cfg(not(target_arch = "x86"))]
                     pub $method: unsafe extern "C" fn(
-                        this: *mut $crate::vtable::c_void
+                        this: *mut $crate::c_void
                         $(, $pname: $pty)*
                     ) $(-> $ret)?,
                 )*
@@ -222,9 +217,9 @@ macro_rules! define_interface {
                 /// Wrap a raw C++ pointer for calling methods.
                 /// Uses compiler fence to prevent optimization issues.
                 #[inline]
-                pub unsafe fn from_ptr<'a>(ptr: *mut $crate::vtable::c_void) -> &'a Self {
+                pub unsafe fn from_ptr<'a>(ptr: *mut $crate::c_void) -> &'a Self {
                     unsafe {
-                        $crate::vtable::compiler_fence($crate::vtable::Ordering::SeqCst);
+                        $crate::compiler_fence($crate::Ordering::SeqCst);
                         let ptr = ::std::ptr::read_volatile(&ptr);
                         &*(ptr as *const Self)
                     }
@@ -233,9 +228,9 @@ macro_rules! define_interface {
                 /// Wrap a raw C++ pointer for calling methods (mutable).
                 /// Uses compiler fence to prevent optimization issues.
                 #[inline]
-                pub unsafe fn from_ptr_mut<'a>(ptr: *mut $crate::vtable::c_void) -> &'a mut Self {
+                pub unsafe fn from_ptr_mut<'a>(ptr: *mut $crate::c_void) -> &'a mut Self {
                     unsafe {
-                        $crate::vtable::compiler_fence($crate::vtable::Ordering::SeqCst);
+                        $crate::compiler_fence($crate::Ordering::SeqCst);
                         let ptr = ::std::ptr::read_volatile(&ptr);
                         &mut *(ptr as *mut Self)
                     }
@@ -257,7 +252,7 @@ macro_rules! define_interface {
         pub unsafe fn $method(&self $(, $pname: $pty)*) $(-> $ret)? {
             unsafe {
                 ((*self.vtable).$method)(
-                    self as *const Self as *mut $crate::vtable::c_void
+                    self as *const Self as *mut $crate::c_void
                     $(, $pname)*
                 )
             }
@@ -270,7 +265,7 @@ macro_rules! define_interface {
         pub unsafe fn $method(&mut self $(, $pname: $pty)*) $(-> $ret)? {
             unsafe {
                 ((*self.vtable).$method)(
-                    self as *mut Self as *mut $crate::vtable::c_void
+                    self as *mut Self as *mut $crate::c_void
                     $(, $pname)*
                 )
             }
@@ -313,7 +308,7 @@ macro_rules! define_class {
             ),* $(,)?
         }
     ) => {
-        $crate::vtable::paste! {
+        $crate::paste! {
             $(#[$meta])*
             #[repr(C)]
             $vis struct $name {
@@ -357,7 +352,7 @@ macro_rules! define_class {
             ),* $(,)?
         }
     ) => {
-        $crate::vtable::paste! {
+        $crate::paste! {
             $(#[$meta])*
             #[repr(C)]
             $vis struct $name {
@@ -430,14 +425,20 @@ macro_rules! define_class {
             ),* $(,)?
         }
     ) => {
-        $crate::vtable::paste! {
+        $crate::paste! {
             /// VTable struct for $name
             #[repr(C)]
             $vis struct [<$name VTable>] {
                 $(
                     $(#[$method_meta])*
-                    pub $method_name: unsafe extern $crate::vtable::extern_abi!() fn(
-                        this: *mut $crate::vtable::c_void
+                    #[cfg(target_arch = "x86")]
+                    pub $method_name: unsafe extern "thiscall" fn(
+                        this: *mut $crate::c_void
+                        $(, $arg_name: $arg_ty)*
+                    ) $(-> $ret_ty)?,
+                    #[cfg(not(target_arch = "x86"))]
+                    pub $method_name: unsafe extern "C" fn(
+                        this: *mut $crate::c_void
                         $(, $arg_name: $arg_ty)*
                     ) $(-> $ret_ty)?,
                 )*
@@ -467,7 +468,7 @@ macro_rules! define_class {
                     pub unsafe fn $method_name(&mut self $(, $arg_name: $arg_ty)*) $(-> $ret_ty)? {
                         unsafe {
                             ((*self.vtable).$method_name)(
-                                self as *mut Self as *mut $crate::vtable::c_void
+                                self as *mut Self as *mut $crate::c_void
                                 $(, $arg_name)*
                             )
                         }
