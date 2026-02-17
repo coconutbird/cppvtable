@@ -1,5 +1,14 @@
 //! C++ VTable interop for Rust (MSVC ABI)
 //!
+//! This crate provides C++ compatible vtable layouts with optional RTTI support.
+//!
+//! ## RTTI (Runtime Type Information)
+//!
+//! When enabled, vtables include type information at slot -1 (negative offset),
+//! matching the MSVC and Itanium ABIs. This enables:
+//! - Runtime type identification
+//! - Safe cross-casting between interfaces (like `dynamic_cast`)
+//!
 //! This crate provides two approaches for defining C++ compatible interfaces:
 //!
 //! ## Declarative macros (`decl` module)
@@ -53,6 +62,7 @@
 //! | No separate crate | ✅ | N/A |
 
 pub mod decl;
+pub mod rtti;
 
 /// Proc-macro approach - re-exports from cppvtable-macro crate
 pub mod proc {
@@ -68,3 +78,7 @@ pub use paste::paste;
 pub use std::ffi::c_void;
 #[doc(hidden)]
 pub use std::sync::atomic::{Ordering, compiler_fence};
+
+// Re-export RTTI types for macro-generated code
+#[doc(hidden)]
+pub use rtti::{TypeInfo, InterfaceInfo};
