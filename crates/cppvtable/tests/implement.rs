@@ -166,3 +166,43 @@ fn test_complex_struct() {
         assert_eq!(slice, b"Hello");
     }
 }
+
+// ============== RTTI Tests ==============
+
+#[test]
+fn test_interface_id_exists() {
+    // Each interface should have an interface_id() method
+    let id1 = ICounter::interface_id();
+    let id2 = INamed::interface_id();
+
+    // IDs should be different (different statics)
+    assert_ne!(id1, id2);
+}
+
+#[test]
+fn test_interface_id_ptr_is_const() {
+    // interface_id_ptr() should be usable in const context
+    const PTR: *const u8 = ICounter::interface_id_ptr();
+    assert!(!PTR.is_null());
+}
+
+#[test]
+fn test_interface_info_const_exists() {
+    // INTERFACE_INFO_I_COUNTER should be generated
+    let info = Counter::INTERFACE_INFO_I_COUNTER;
+
+    // interface_id should match ICounter's ID
+    assert!(std::ptr::eq(info.interface_id, ICounter::interface_id_ptr()));
+
+    // offset should be 0 (vtable at start of struct)
+    assert_eq!(info.offset, 0);
+}
+
+#[test]
+fn test_interface_info_offset() {
+    // INTERFACE_INFO_I_NAMED should have correct offset
+    let info = NamedThing::INTERFACE_INFO_I_NAMED;
+
+    // offset should match actual struct layout
+    assert_eq!(info.offset as usize, std::mem::offset_of!(NamedThing, vtable_i_named));
+}

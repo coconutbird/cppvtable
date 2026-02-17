@@ -23,12 +23,32 @@ use std::ffi::c_void;
 
 /// Information about a single interface implementation
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct InterfaceInfo {
-    /// Unique identifier for the interface (typically address of a static)
-    pub interface_id: usize,
+    /// Unique identifier for the interface (address of a static marker)
+    pub interface_id: *const u8,
     /// Byte offset from object start to this interface's vtable pointer
     pub offset: isize,
+}
+
+// SAFETY: InterfaceInfo only contains a pointer to a static and an offset
+unsafe impl Send for InterfaceInfo {}
+unsafe impl Sync for InterfaceInfo {}
+
+impl std::fmt::Debug for InterfaceInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InterfaceInfo")
+            .field("interface_id", &(self.interface_id as usize))
+            .field("offset", &self.offset)
+            .finish()
+    }
+}
+
+impl InterfaceInfo {
+    /// Create a new InterfaceInfo
+    pub const fn new(interface_id: *const u8, offset: isize) -> Self {
+        Self { interface_id, offset }
+    }
 }
 
 /// Runtime type information for a concrete class
@@ -61,9 +81,9 @@ impl TypeInfo {
     ///
     /// # Safety
     /// - `object_ptr` must point to a valid instance of the type this TypeInfo describes
-    pub unsafe fn query_interface(&self, object_ptr: *const c_void, interface_id: usize) -> *const c_void {
+    pub unsafe fn query_interface(&self, object_ptr: *const c_void, interface_id: *const u8) -> *const c_void {
         for info in self.interfaces {
-            if info.interface_id == interface_id {
+            if std::ptr::eq(info.interface_id, interface_id) {
                 // SAFETY: Caller guarantees object_ptr is valid and offset is correct for this type
                 return unsafe { (object_ptr as *const u8).offset(info.offset) as *const c_void };
             }
@@ -72,8 +92,8 @@ impl TypeInfo {
     }
 
     /// Check if this type implements a given interface
-    pub fn implements(&self, interface_id: usize) -> bool {
-        self.interfaces.iter().any(|i| i.interface_id == interface_id)
+    pub fn implements(&self, interface_id: *const u8) -> bool {
+        self.interfaces.iter().any(|i| std::ptr::eq(i.interface_id, interface_id))
     }
 }
 

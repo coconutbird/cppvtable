@@ -141,3 +141,66 @@ fn test_vtable_calls_through_secondary() {
         assert_eq!(result, 14); // 7 * 2
     }
 }
+
+// ============== RTTI Tests ==============
+
+#[test]
+fn test_multiple_interface_info_consts() {
+    // Both interfaces should have INTERFACE_INFO consts
+    let info_first = MultiImpl::INTERFACE_INFO_I_FIRST;
+    let info_second = MultiImpl::INTERFACE_INFO_I_SECOND;
+
+    // Different interface IDs
+    assert!(!std::ptr::eq(info_first.interface_id, info_second.interface_id));
+
+    // IDs should match respective interfaces
+    assert!(std::ptr::eq(info_first.interface_id, IFirst::interface_id_ptr()));
+    assert!(std::ptr::eq(info_second.interface_id, ISecond::interface_id_ptr()));
+}
+
+#[test]
+fn test_interface_info_offsets() {
+    let info_first = MultiImpl::INTERFACE_INFO_I_FIRST;
+    let info_second = MultiImpl::INTERFACE_INFO_I_SECOND;
+
+    // Primary interface at offset 0
+    assert_eq!(info_first.offset, 0);
+
+    // Secondary interface at offset 8 (pointer size on x64)
+    #[cfg(target_pointer_width = "64")]
+    assert_eq!(info_second.offset, 8);
+    #[cfg(target_pointer_width = "32")]
+    assert_eq!(info_second.offset, 4);
+}
+
+#[test]
+fn test_rtti_query_interface_simulation() {
+    use cppvtable::rtti::{TypeInfo, InterfaceInfo};
+
+    // Manually create TypeInfo for MultiImpl (this would be auto-generated in future)
+    let interfaces: &'static [InterfaceInfo] = Box::leak(Box::new([
+        MultiImpl::INTERFACE_INFO_I_FIRST,
+        MultiImpl::INTERFACE_INFO_I_SECOND,
+    ]));
+
+    let type_info = TypeInfo::new(1, "MultiImpl", interfaces);
+
+    // Query should work
+    assert!(type_info.implements(IFirst::interface_id_ptr()));
+    assert!(type_info.implements(ISecond::interface_id_ptr()));
+
+    // Create object and test query_interface
+    let obj = MultiImpl::new(42);
+    let obj_ptr = &obj as *const MultiImpl as *const std::ffi::c_void;
+
+    unsafe {
+        // Query for IFirst (offset 0)
+        let first_ptr = type_info.query_interface(obj_ptr, IFirst::interface_id_ptr());
+        assert_eq!(first_ptr, obj_ptr); // Same pointer
+
+        // Query for ISecond (offset 8)
+        let second_ptr = type_info.query_interface(obj_ptr, ISecond::interface_id_ptr());
+        let expected_ptr = (obj_ptr as *const u8).offset(8) as *const std::ffi::c_void;
+        assert_eq!(second_ptr, expected_ptr);
+    }
+}

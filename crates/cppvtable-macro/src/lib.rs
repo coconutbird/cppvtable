@@ -9,6 +9,12 @@
 //! - x64: `C` (this as first param)
 //!
 //! Supports explicit slot indices via `#[slot(N)]` attribute on methods.
+//!
+//! ## RTTI Support
+//!
+//! Both macros generate RTTI (Runtime Type Information) compatible with MSVC/Itanium ABI:
+//! - `#[cpp_interface]` generates a unique interface ID
+//! - `#[implement]` generates TypeInfo with interface offsets for this-adjustment
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
@@ -261,9 +267,16 @@ pub fn cpp_interface(attr: TokenStream, item: TokenStream) -> TokenStream {
         current_slot += 1;
     }
 
+    // Generate interface ID names
+    // IFoo -> IID_IFOO (static) and iid_i_foo() (helper function)
+    let iid_static_name = format_ident!("IID_{}", trait_name.to_string().to_uppercase());
+
     let expanded = quote! {
+        /// Unique interface ID for RTTI (address of this static serves as ID)
+        #[doc(hidden)]
+        #vis static #iid_static_name: u8 = 0;
+
         /// VTable struct for #trait_name
-        /// Note: In MSVC ABI, RTTI pointer would be at offset -1 (not included here)
         #[repr(C)]
         #vis struct #vtable_name {
             #(#vtable_fields),*
@@ -276,6 +289,18 @@ pub fn cpp_interface(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
 
         impl #trait_name {
+            /// Get the interface ID pointer for this interface type (const-compatible)
+            #[inline]
+            pub const fn interface_id_ptr() -> *const u8 {
+                &#iid_static_name as *const u8
+            }
+
+            /// Get the interface ID for this interface type as usize
+            #[inline]
+            pub fn interface_id() -> usize {
+                Self::interface_id_ptr() as usize
+            }
+
             /// Get the vtable
             #[inline]
             pub fn vtable(&self) -> &#vtable_name {
@@ -522,6 +547,12 @@ pub fn implement(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Generate const name matching field naming convention: vtable_i_foo -> VTABLE_I_FOO
     let vtable_const_name = format_ident!("{}", vtable_field.to_string().to_uppercase());
 
+    // Generate RTTI InterfaceInfo const name: IFoo -> INTERFACE_INFO_I_FOO
+    let interface_info_const_name = format_ident!(
+        "INTERFACE_INFO_{}",
+        vtable_field.to_string().trim_start_matches("vtable_").to_uppercase()
+    );
+
     let expanded = quote! {
         // The wrapper functions (private)
         #(#wrapper_fns)*
@@ -531,11 +562,18 @@ pub fn implement(attr: TokenStream, item: TokenStream) -> TokenStream {
             #(#vtable_entries),*
         };
 
-        // Original impl with methods + vtable const accessor
+        // Original impl with methods + vtable const accessor + RTTI
         impl #struct_type {
             /// Pointer to the vtable for this interface implementation.
             /// Use this when constructing the struct.
             pub const #vtable_const_name: *const #vtable_name = &#vtable_static_name;
+
+            /// RTTI: Interface info for this interface implementation.
+            /// Contains interface ID and byte offset from struct start.
+            pub const #interface_info_const_name: cppvtable::InterfaceInfo = cppvtable::InterfaceInfo {
+                interface_id: #interface_name::interface_id_ptr(),
+                offset: ::std::mem::offset_of!(Self, #vtable_field) as isize,
+            };
 
             #(#original_methods)*
         }
