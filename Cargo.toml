@@ -1,0 +1,12 @@
+[package]
+name = "vtables"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+paste = "1.0.15"
+vtable-macro = { path = "vtable-macro" }
+cpp = "0.5"
+
+[build-dependencies]
+cpp_build = "0.5"
