@@ -167,7 +167,7 @@ pub trait IAnimal {
 /// A Dog struct that will implement IAnimal
 #[repr(C)]
 pub struct Dog {
-    vtable: *const IAnimalVTable,
+    vtable_i_animal: *const IAnimalVTable,
     pub name: [u8; 32],
 }
 
@@ -188,7 +188,7 @@ impl Dog {
 impl Dog {
     pub fn new(name: &str) -> Self {
         let mut dog = Dog {
-            vtable: Self::vtable_ptr(),
+            vtable_i_animal: &__DOG_IANIMAL_VTABLE,
             name: [0u8; 32],
         };
         let bytes = name.as_bytes();
@@ -205,7 +205,7 @@ impl Dog {
 /// Cat also implements IAnimal
 #[repr(C)]
 pub struct Cat {
-    vtable: *const IAnimalVTable,
+    vtable_i_animal: *const IAnimalVTable,
     pub lives: i32,
 }
 
@@ -223,7 +223,7 @@ impl Cat {
 impl Cat {
     pub fn new(lives: i32) -> Self {
         Cat {
-            vtable: Self::vtable_ptr(),
+            vtable_i_animal: &__CAT_IANIMAL_VTABLE,
             lives,
         }
     }
@@ -248,7 +248,7 @@ const SCORE_UNCOMPUTED: f32 = -3.4028235e38;
 
 #[repr(C)]
 pub struct GearScore {
-    vtable: *const IGearScoreVTable,
+    vtable_i_gear_score: *const IGearScoreVTable,
     pub scores: [f32; 2],
     pub confidence: [f32; 2],
 }
@@ -288,7 +288,7 @@ impl GearScore {
 impl GearScore {
     pub fn new() -> Self {
         GearScore {
-            vtable: Self::vtable_ptr(),
+            vtable_i_gear_score: &__GEARSCORE_IGEARSCORE_VTABLE,
             scores: [SCORE_UNCOMPUTED; 2],
             confidence: [1.0; 2],
         }
@@ -311,7 +311,7 @@ pub trait ISlotTest {
 
 #[repr(C)]
 pub struct SlotTester {
-    vtable: *const ISlotTestVTable,
+    vtable_i_slot_test: *const ISlotTestVTable,
 }
 
 #[implement(ISlotTest)]
@@ -334,7 +334,100 @@ impl SlotTester {
 impl SlotTester {
     pub fn new() -> Self {
         SlotTester {
-            vtable: Self::vtable_ptr(),
+            vtable_i_slot_test: &__SLOTTESTER_ISLOTTEST_VTABLE,
+        }
+    }
+}
+
+// =============================================================================
+// TEST: Multiple inheritance
+// =============================================================================
+
+/// Interface for things that can swim
+#[cpp_interface]
+pub trait ISwimmer {
+    fn swim(&self);
+    fn swim_speed(&self) -> f32;
+}
+
+/// Interface for things that can fly
+#[cpp_interface]
+pub trait IFlyer {
+    fn fly(&self);
+    fn fly_altitude(&self) -> f32;
+}
+
+/// A duck can both swim and fly - multiple inheritance!
+#[repr(C)]
+pub struct Duck {
+    // Multiple vtable pointers - one per interface
+    vtable_i_swimmer: *const ISwimmerVTable,
+    vtable_i_flyer: *const IFlyerVTable,
+    pub name: [u8; 16],
+}
+
+// Implement ISwimmer for Duck
+#[implement(ISwimmer)]
+impl Duck {
+    fn swim(&self) {
+        let name = std::str::from_utf8(&self.name)
+            .unwrap_or("?")
+            .trim_end_matches('\0');
+        println!("{} is swimming!", name);
+    }
+    fn swim_speed(&self) -> f32 {
+        2.5
+    }
+}
+
+// Implement IFlyer for Duck (separate impl block)
+#[implement(IFlyer)]
+impl Duck {
+    fn fly(&self) {
+        let name = std::str::from_utf8(&self.name)
+            .unwrap_or("?")
+            .trim_end_matches('\0');
+        println!("{} is flying!", name);
+    }
+    fn fly_altitude(&self) -> f32 {
+        100.0
+    }
+}
+
+impl Duck {
+    pub fn new(name: &str) -> Self {
+        let mut duck = Duck {
+            vtable_i_swimmer: Duck::vtable_ptr_i_swimmer(),
+            vtable_i_flyer: Duck::vtable_ptr_i_flyer(),
+            name: [0u8; 16],
+        };
+        let bytes = name.as_bytes();
+        let len = bytes.len().min(15);
+        duck.name[..len].copy_from_slice(&bytes[..len]);
+        duck
+    }
+
+    /// Get vtable pointer for ISwimmer interface
+    pub fn vtable_ptr_i_swimmer() -> *const ISwimmerVTable {
+        &__DUCK_ISWIMMER_VTABLE
+    }
+
+    /// Get vtable pointer for IFlyer interface
+    pub fn vtable_ptr_i_flyer() -> *const IFlyerVTable {
+        &__DUCK_IFLYER_VTABLE
+    }
+
+    /// Cast to ISwimmer (primary interface at offset 0)
+    pub fn as_swimmer(&self) -> &ISwimmer {
+        unsafe { &*(self as *const Self as *const ISwimmer) }
+    }
+
+    /// Cast to IFlyer (secondary interface - requires this-adjustment)
+    pub fn as_flyer(&self) -> &IFlyer {
+        unsafe {
+            let ptr = (self as *const Self as *const u8)
+                .add(std::mem::offset_of!(Self, vtable_i_flyer));
+            &*(ptr as *const IFlyer)
         }
     }
 }
@@ -457,6 +550,48 @@ fn main() {
         assert_eq!(iface.method_at_6(), 6, "method_at_6 should return 6");
     }
     println!("  All slot methods called correctly!");
+
+    // =========================================================================
+    // TEST: Multiple inheritance
+    // =========================================================================
+    println!("\n--- Multiple inheritance test ---");
+
+    let duck = Duck::new("Donald");
+    println!("Duck struct size: {} bytes", std::mem::size_of::<Duck>());
+    println!(
+        "  vtable_i_swimmer offset: {}",
+        std::mem::offset_of!(Duck, vtable_i_swimmer)
+    );
+    println!(
+        "  vtable_i_flyer offset: {}",
+        std::mem::offset_of!(Duck, vtable_i_flyer)
+    );
+
+    // Direct method calls
+    println!("\nDirect calls:");
+    duck.swim();
+    duck.fly();
+    println!("  swim_speed: {}", duck.swim_speed());
+    println!("  fly_altitude: {}", duck.fly_altitude());
+
+    // Polymorphic calls through interfaces
+    println!("\nPolymorphic calls through ISwimmer:");
+    let swimmer = duck.as_swimmer();
+    let swimmer = unsafe { std::ptr::from_ref(swimmer).cast_mut().as_mut().unwrap() };
+    unsafe {
+        swimmer.swim();
+        println!("  swim_speed via interface: {}", swimmer.swim_speed());
+    }
+
+    println!("\nPolymorphic calls through IFlyer (this-adjusted):");
+    let flyer = duck.as_flyer();
+    let flyer = unsafe { std::ptr::from_ref(flyer).cast_mut().as_mut().unwrap() };
+    unsafe {
+        flyer.fly();
+        println!("  fly_altitude via interface: {}", flyer.fly_altitude());
+    }
+
+    println!("  Multiple inheritance works!");
 
     // Struct sizes
     println!("\n=== Struct sizes ===");

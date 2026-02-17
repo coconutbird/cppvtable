@@ -36,6 +36,37 @@ fn parse_slot_attr(attrs: &[Attribute]) -> Option<usize> {
     None
 }
 
+/// Convert interface name to vtable field name (snake_case with vtable_ prefix)
+/// IFoo -> vtable_i_foo
+/// IAnimal -> vtable_i_animal
+/// IGearScore -> vtable_i_gear_score
+fn interface_to_field_name(interface: &Ident) -> Ident {
+    let name = interface.to_string();
+    let chars: Vec<char> = name.chars().collect();
+    let mut result = String::from("vtable_");
+
+    for (i, &c) in chars.iter().enumerate() {
+        if c.is_uppercase() {
+            // Add underscore before uppercase if:
+            // - Not at start, AND
+            // - Either previous char was lowercase, OR
+            //   next char exists and is lowercase (handles "IA" in "IAnimal")
+            if i > 0 {
+                let prev_lower = chars[i - 1].is_lowercase();
+                let next_lower = chars.get(i + 1).map_or(false, |c| c.is_lowercase());
+                if prev_lower || next_lower {
+                    result.push('_');
+                }
+            }
+            result.push(c.to_ascii_lowercase());
+        } else {
+            result.push(c);
+        }
+    }
+
+    format_ident!("{}", result)
+}
+
 /// Define a C++ compatible interface.
 ///
 /// This generates:
@@ -261,7 +292,6 @@ pub fn implement(attr: TokenStream, item: TokenStream) -> TokenStream {
     struct ImplMethodInfo {
         slot: usize,
         name: Ident,
-        wrapper_name: Ident,
         param_names: Vec<Ident>,
         param_types: Vec<Box<Type>>,
         output: syn::ReturnType,
@@ -275,7 +305,6 @@ pub fn implement(attr: TokenStream, item: TokenStream) -> TokenStream {
     for item in &input.items {
         if let ImplItem::Fn(method) = item {
             let method_name = method.sig.ident.clone();
-            let wrapper_name = format_ident!("__{}__{}", struct_name, method_name);
             let output = method.sig.output.clone();
 
             // Check for #[slot(N)] attribute
@@ -318,7 +347,6 @@ pub fn implement(attr: TokenStream, item: TokenStream) -> TokenStream {
             methods.push(ImplMethodInfo {
                 slot,
                 name: method_name,
-                wrapper_name,
                 param_names: params.iter().map(|(n, _)| n.clone()).collect(),
                 param_types: params.iter().map(|(_, t)| t.clone()).collect(),
                 output,
@@ -331,6 +359,9 @@ pub fn implement(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Sort by slot index
     methods.sort_by_key(|m| m.slot);
 
+    // Derive vtable field name from interface name for this-adjustment
+    let vtable_field = interface_to_field_name(&interface_name);
+
     // Generate wrapper functions and vtable entries, filling gaps
     let mut wrapper_fns = Vec::new();
     let mut vtable_entries = Vec::new();
@@ -341,7 +372,7 @@ pub fn implement(attr: TokenStream, item: TokenStream) -> TokenStream {
         // Fill gaps with dummy panic stubs
         while current_slot < method.slot {
             let dummy_name = format_ident!("__reserved_slot_{}", current_slot);
-            let dummy_wrapper = format_ident!("__{}__{}", struct_name, dummy_name);
+            let dummy_wrapper = format_ident!("__{}__{}__{}", struct_name, interface_name, dummy_name);
 
             wrapper_fns.push(quote! {
                 #[allow(non_snake_case)]
@@ -365,15 +396,23 @@ pub fn implement(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
 
         let method_name = &method.name;
-        let wrapper_name = &method.wrapper_name;
+        // Include interface name in wrapper to avoid conflicts with multiple inheritance
+        let wrapper_name = format_ident!("__{}__{}__{}", struct_name, interface_name, method_name);
         let param_names = &method.param_names;
         let param_types = &method.param_types;
         let output = &method.output;
 
+        // This-adjustment: subtract the offset to get from interface pointer to struct start
+        // Uses offset_of! to calculate the offset at compile time
+        let this_adjust = quote! {
+            let offset = ::std::mem::offset_of!(#struct_type, #vtable_field);
+            let adjusted = (this as *mut u8).sub(offset) as *mut #struct_type;
+        };
+
         let this_cast = if method.is_mut {
-            quote! { &mut *(this as *mut #struct_type) }
+            quote! { &mut *adjusted }
         } else {
-            quote! { &*(this as *const #struct_type) }
+            quote! { &*adjusted }
         };
 
         // Generate wrapper function
@@ -386,6 +425,7 @@ pub fn implement(attr: TokenStream, item: TokenStream) -> TokenStream {
                 #(, #param_names: #param_types)*
             ) #output {
                 unsafe {
+                    #this_adjust
                     let obj = #this_cast;
                     obj.#method_name(#(#param_names),*)
                 }
@@ -398,6 +438,7 @@ pub fn implement(attr: TokenStream, item: TokenStream) -> TokenStream {
                 #(, #param_names: #param_types)*
             ) #output {
                 unsafe {
+                    #this_adjust
                     let obj = #this_cast;
                     obj.#method_name(#(#param_names),*)
                 }
@@ -417,7 +458,12 @@ pub fn implement(attr: TokenStream, item: TokenStream) -> TokenStream {
         current_slot += 1;
     }
 
-    let vtable_static_name = format_ident!("__{}_VTABLE", struct_name.to_string().to_uppercase());
+    // Include interface name in vtable static name to support multiple interfaces
+    let vtable_static_name = format_ident!(
+        "__{}_{}_VTABLE",
+        struct_name.to_string().to_uppercase(),
+        interface_name.to_string().to_uppercase()
+    );
 
     let expanded = quote! {
         // The wrapper functions (private)
@@ -430,18 +476,6 @@ pub fn implement(attr: TokenStream, item: TokenStream) -> TokenStream {
 
         // Original impl with methods
         impl #struct_type {
-            /// Get the vtable for this implementation
-            #[inline]
-            pub fn vtable_for_interface() -> &'static #vtable_name {
-                &#vtable_static_name
-            }
-
-            /// Get vtable pointer (for initializing the struct)
-            #[inline]
-            pub fn vtable_ptr() -> *const #vtable_name {
-                &#vtable_static_name
-            }
-
             #(#original_methods)*
         }
     };
