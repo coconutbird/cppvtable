@@ -51,9 +51,9 @@ define_class! {
 ### Proc-Macros
 
 ```rust
-use cppvtable::proc::{cpp_interface, implement};
+use cppvtable::proc::{cppvtable, cppvtable_impl};
 
-#[cpp_interface]
+#[cppvtable]
 pub trait IAnimal {
     fn speak(&self);
     fn legs(&self) -> i32;
@@ -65,7 +65,7 @@ pub struct Dog {
     pub name: [u8; 32],
 }
 
-#[implement(IAnimal)]
+#[cppvtable_impl(IAnimal)]
 impl Dog {
     fn speak(&self) {
         println!("Woof!");
@@ -112,7 +112,7 @@ cppvtable/
     │       └── rtti.rs     # Rust-side RTTI for interface casting
     ├── cppvtable-macro/    # Proc-macro crate
     │   └── src/
-    │       └── lib.rs      # #[cpp_interface], #[implement]
+    │       └── lib.rs      # #[cppvtable], #[cppvtable_impl]
     └── cppvtable-cpp-tests/ # C++ interop tests (requires MSVC, 12 tests)
         └── src/
             ├── lib.rs      # C++ classes, helpers, Rust interfaces
