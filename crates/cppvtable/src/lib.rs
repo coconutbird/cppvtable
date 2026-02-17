@@ -63,11 +63,44 @@
 //! | RTTI support | ✅ | ✅ |
 //! | Multiple inheritance | ✅ | ✅ |
 
+pub mod com;
 pub mod decl;
 pub mod rtti;
 
+// =============================================================================
+// VTableLayout - Trait for interface inheritance
+// =============================================================================
+
+/// Trait providing vtable layout information for interface inheritance.
+///
+/// This trait is automatically implemented by `#[cppvtable]` for each interface.
+/// It enables `extends(Base)` to inherit from another interface.
+///
+/// # Example
+/// ```ignore
+/// use cppvtable::proc::cppvtable;
+///
+/// #[cppvtable]
+/// pub trait IBase {
+///     fn base_method(&self);
+/// }
+///
+/// #[cppvtable(extends(IBase))]
+/// pub trait IDerived {
+///     fn derived_method(&self);  // Starts at slot 1
+/// }
+/// ```
+pub trait VTableLayout {
+    /// The number of vtable slots used by this interface (including inherited slots).
+    const SLOT_COUNT: usize;
+
+    /// The vtable struct type for this interface.
+    type VTable;
+}
+
 /// Proc-macro approach - re-exports from cppvtable-macro crate
 pub mod proc {
+    pub use cppvtable_macro::{com_implement, com_interface};
     pub use cppvtable_macro::{cppvtable, cppvtable_impl};
 }
 
@@ -84,3 +117,10 @@ pub use std::sync::atomic::{Ordering, compiler_fence};
 // Re-export RTTI types for macro-generated code
 #[doc(hidden)]
 pub use rtti::{InterfaceInfo, TypeInfo};
+
+// Re-export COM types for macro-generated code
+#[doc(hidden)]
+pub use com::{
+    ComRefCount, E_NOINTERFACE, E_POINTER, GUID, HRESULT, IID_IUNKNOWN, IUnknown, IUnknownVTable,
+    S_OK,
+};

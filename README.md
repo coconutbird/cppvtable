@@ -6,6 +6,7 @@ Define C++ compatible interfaces and classes in Rust that can:
 
 - Call methods on C++ objects passed to Rust
 - Be passed to C++ code which can call methods through the vtable
+- Implement COM interfaces with proper IUnknown support
 
 ## Features
 
@@ -14,6 +15,7 @@ Define C++ compatible interfaces and classes in Rust that can:
 - **Explicit slot indices** - `[N] fn method()` syntax for specific vtable slots
 - **Multiple inheritance** - proper this-pointer adjustment
 - **Rust-side RTTI** - `TypeInfo` and `cast_to()` for runtime interface casting
+- **COM support** - `#[com_interface]` and `#[com_implement]` for COM interfaces with auto-generated IUnknown
 - **Two macro approaches** - declarative (`macro_rules!`) and proc-macro
 
 ## Limitations
@@ -22,33 +24,40 @@ Define C++ compatible interfaces and classes in Rust that can:
 
 ## Usage
 
-### Declarative Macros
+### COM Interfaces
 
 ```rust
-use cppvtable::{define_interface, define_class};
+use cppvtable::com::{ComRefCount, HRESULT, S_OK};
+use cppvtable::proc::{com_interface, com_implement};
 
-define_interface! {
-    interface IAnimal {
-        fn speak(&self);
-        fn legs(&self) -> i32;
-    }
+// Define a COM interface (automatically extends IUnknown)
+#[com_interface("12345678-1234-5678-9abc-def012345678")]
+pub trait ICalculator {
+    fn add(&self, a: i32, b: i32) -> i32;
+    fn multiply(&self, a: i32, b: i32) -> i32;
 }
 
-define_interface! {
-    interface IAdvancedAnimal : IAnimal {
-        fn run(&mut self);
-        [5] fn special_method(&self);  // explicit slot index
-    }
+// Implement the interface
+#[repr(C)]
+pub struct Calculator {
+    vtable_i_calculator: *const ICalculatorVTable,
+    ref_count: ComRefCount,
+    base_value: i32,
 }
 
-define_class! {
-    pub class Dog : IAnimal {
-        pub name: [u8; 32],
+#[com_implement(ICalculator)]
+impl Calculator {
+    fn add(&self, a: i32, b: i32) -> i32 {
+        self.base_value + a + b
     }
+    fn multiply(&self, a: i32, b: i32) -> i32 {
+        self.base_value * a * b
+    }
+    // IUnknown methods (query_interface, add_ref, release) are auto-generated
 }
 ```
 
-### Proc-Macros
+### Proc-Macros (Non-COM)
 
 ```rust
 use cppvtable::proc::{cppvtable, cppvtable_impl};
@@ -76,6 +85,32 @@ impl Dog {
 }
 ```
 
+### Declarative Macros
+
+```rust
+use cppvtable::{define_interface, define_class};
+
+define_interface! {
+    interface IAnimal {
+        fn speak(&self);
+        fn legs(&self) -> i32;
+    }
+}
+
+define_interface! {
+    interface IAdvancedAnimal : IAnimal {
+        fn run(&mut self);
+        [5] fn special_method(&self);  // explicit slot index
+    }
+}
+
+define_class! {
+    pub class Dog : IAnimal {
+        pub name: [u8; 32],
+    }
+}
+```
+
 ### Consuming C++ Objects
 
 ```rust
@@ -92,12 +127,13 @@ unsafe {
 
 ## Feature Comparison
 
-| Feature           | Declarative        | Proc-macro      |
-| ----------------- | ------------------ | --------------- |
-| Slot indices      | ✅ `[N] fn method` | ✅ `#[slot(N)]` |
-| thiscall (x86)    | ✅                 | ✅              |
-| Clean Rust syntax | ❌                 | ✅              |
-| No separate crate | ✅                 | N/A             |
+| Feature           | Declarative        | Proc-macro      | COM               |
+| ----------------- | ------------------ | --------------- | ----------------- |
+| Slot indices      | ✅ `[N] fn method` | ✅ `#[slot(N)]` | ✅ (auto)         |
+| thiscall (x86)    | ✅                 | ✅              | ✅ (stdcall)      |
+| IUnknown support  | ❌                 | ❌              | ✅ (auto)         |
+| Interface IID     | ❌                 | ❌              | ✅ (GUID)         |
+| Clean Rust syntax | ❌                 | ✅              | ✅                |
 
 ## Project Structure
 
@@ -105,15 +141,16 @@ unsafe {
 cppvtable/
 ├── Cargo.toml              # Workspace root
 └── crates/
-    ├── cppvtable/          # Main library (pure Rust, 63 tests)
+    ├── cppvtable/          # Main library (pure Rust)
     │   └── src/
     │       ├── lib.rs      # Re-exports both approaches
     │       ├── decl.rs     # Declarative macros
+    │       ├── com.rs      # COM types (GUID, HRESULT, IUnknown)
     │       └── rtti.rs     # Rust-side RTTI for interface casting
     ├── cppvtable-macro/    # Proc-macro crate
     │   └── src/
-    │       └── lib.rs      # #[cppvtable], #[cppvtable_impl]
-    └── cppvtable-cpp-tests/ # C++ interop tests (requires MSVC, 12 tests)
+    │       └── lib.rs      # #[cppvtable], #[cppvtable_impl], #[com_interface], #[com_implement]
+    └── cppvtable-cpp-tests/ # C++ interop tests (requires MSVC)
         └── src/
             ├── lib.rs      # C++ classes, helpers, Rust interfaces
             ├── single.rs   # Single inheritance tests
@@ -133,13 +170,14 @@ cargo test -p cppvtable-cpp-tests
 cargo test --workspace
 ```
 
-**Test coverage (75 total):**
+**Test coverage (87 tests):**
 
 - Single & multiple inheritance
 - This-pointer adjustment for secondary interfaces
 - Rust calling C++ objects, C++ calling Rust objects
 - TypeInfo/RTTI: `implements()`, `cast_to()`, null for unknown interfaces
 - VTable layout verification against MSVC
+- COM interfaces: IID generation, QueryInterface, AddRef/Release, interface inheritance
 
 ## Requirements
 
