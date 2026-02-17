@@ -6,6 +6,11 @@ description = "C++ vtable interop for Rust (MSVC ABI compatible)"
 license = "MIT"
 repository = "https://github.com/coconutbird/cppvtable"
 
+[features]
+default = []
+windows-compat = ["dep:windows-core"]
+
 [dependencies]
 paste = "1.0"
 cppvtable-macro = { path = "../cppvtable-macro" }
+windows-core = { version = "0.62", optional = true }
