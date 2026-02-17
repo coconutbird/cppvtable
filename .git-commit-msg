@@ -1,12 +1,10 @@
-Add compile-time validation for C++ vtable compatibility
+Fix all clippy warnings
 
-Added validation in proc-macros to catch unsupported features at compile time:
+Proc-macro crate:
+- Collapse nested if statements using let-chains (collapsible_if)
+- Use is_some_and instead of map_or(false, ...) (unnecessary_map_or)
+- Change Vec<Box<Type>> to Vec<Type> (vec_box - Box is redundant)
+- Collapse nested match expressions (collapsible_match)
 
-- self by value (must use &self or &mut self)
-- Generic methods (not supported in C++ vtables)
-- Generic traits/impls (not supported in C++ vtables)
-- async fn (not supported in C++ vtables)
-- Non-FFI-safe types: String, Vec, Box, Rc, Arc, Result, references, slices, trait objects, impl Trait
-- Methods without &self/&mut self (C++ vtables require a this pointer)
-
-Each error includes a helpful message explaining what to use instead.
+Main example and tests:
+- Add Default implementations for types with pub fn new() (new_without_default)

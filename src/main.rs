@@ -299,6 +299,12 @@ impl CachedMetrics {
     }
 }
 
+impl Default for CachedMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CachedMetrics {
     pub fn new() -> Self {
         CachedMetrics {
@@ -342,6 +348,12 @@ impl SlotTester {
     }
     fn method_at_6(&self) -> i32 {
         6
+    }
+}
+
+impl Default for SlotTester {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

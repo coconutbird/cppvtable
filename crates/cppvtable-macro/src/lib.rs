@@ -36,16 +36,37 @@ fn check_ffi_safe_type(ty: &Type) -> Result<(), String> {
                 let name = segment.ident.to_string();
                 match name.as_str() {
                     // Rust-specific types that are not FFI-safe
-                    "String" => return Err("String is not FFI-safe. Use *const c_char or *const u8 instead".into()),
-                    "Vec" => return Err("Vec<T> is not FFI-safe. Use *const T and a length parameter instead".into()),
+                    "String" => {
+                        return Err(
+                            "String is not FFI-safe. Use *const c_char or *const u8 instead".into(),
+                        );
+                    }
+                    "Vec" => {
+                        return Err(
+                            "Vec<T> is not FFI-safe. Use *const T and a length parameter instead"
+                                .into(),
+                        );
+                    }
                     "Box" => return Err("Box<T> is not FFI-safe. Use *mut T instead".into()),
-                    "Rc" | "Arc" => return Err(format!("{} is not FFI-safe. Use raw pointers instead", name)),
+                    "Rc" | "Arc" => {
+                        return Err(format!(
+                            "{} is not FFI-safe. Use raw pointers instead",
+                            name
+                        ));
+                    }
                     "Option" => {
                         // Option<NonNull<T>> and Option<fn> are FFI-safe, but Option<T> generally isn't
                         // We'll allow it with a note that the user should be careful
                     }
-                    "Result" => return Err("Result<T, E> is not FFI-safe. Use error codes or out-parameters instead".into()),
-                    "str" => return Err("str is not FFI-safe. Use *const c_char or *const u8 instead".into()),
+                    "Result" => return Err(
+                        "Result<T, E> is not FFI-safe. Use error codes or out-parameters instead"
+                            .into(),
+                    ),
+                    "str" => {
+                        return Err(
+                            "str is not FFI-safe. Use *const c_char or *const u8 instead".into(),
+                        );
+                    }
                     _ => {}
                 }
             }
@@ -53,7 +74,11 @@ fn check_ffi_safe_type(ty: &Type) -> Result<(), String> {
         Type::Reference(type_ref) => {
             // References other than &self/&mut self should be warned about
             // But we can't easily distinguish &self here, so we'll check in the method validation
-            let mutability = if type_ref.mutability.is_some() { "&mut " } else { "&" };
+            let mutability = if type_ref.mutability.is_some() {
+                "&mut "
+            } else {
+                "&"
+            };
             return Err(format!(
                 "{}T references are not recommended for FFI. Use *const T or *mut T instead. \
                  References have Rust-specific guarantees that C++ won't uphold",
@@ -61,7 +86,9 @@ fn check_ffi_safe_type(ty: &Type) -> Result<(), String> {
             ));
         }
         Type::Slice(_) => {
-            return Err("Slices [T] are not FFI-safe. Use *const T and a length parameter instead".into());
+            return Err(
+                "Slices [T] are not FFI-safe. Use *const T and a length parameter instead".into(),
+            );
         }
         Type::TraitObject(_) => {
             return Err("Trait objects (dyn Trait) are not FFI-safe".into());
@@ -70,7 +97,9 @@ fn check_ffi_safe_type(ty: &Type) -> Result<(), String> {
             return Err("impl Trait is not FFI-safe".into());
         }
         Type::Tuple(tuple) if !tuple.elems.is_empty() => {
-            return Err("Non-empty tuples are not FFI-safe. Use a #[repr(C)] struct instead".into());
+            return Err(
+                "Non-empty tuples are not FFI-safe. Use a #[repr(C)] struct instead".into(),
+            );
         }
         _ => {}
     }
@@ -86,7 +115,10 @@ fn validate_trait_method(method: &syn::TraitItemFn) -> Result<(), syn::Error> {
     if method.sig.asyncness.is_some() {
         return Err(syn::Error::new(
             span,
-            format!("method '{}': async functions are not supported in C++ vtables", method_name),
+            format!(
+                "method '{}': async functions are not supported in C++ vtables",
+                method_name
+            ),
         ));
     }
 
@@ -94,12 +126,19 @@ fn validate_trait_method(method: &syn::TraitItemFn) -> Result<(), syn::Error> {
     if !method.sig.generics.params.is_empty() {
         return Err(syn::Error::new(
             span,
-            format!("method '{}': generic methods are not supported in C++ vtables", method_name),
+            format!(
+                "method '{}': generic methods are not supported in C++ vtables",
+                method_name
+            ),
         ));
     }
 
     // Check for self parameter
-    let has_self = method.sig.inputs.iter().any(|arg| matches!(arg, FnArg::Receiver(_)));
+    let has_self = method
+        .sig
+        .inputs
+        .iter()
+        .any(|arg| matches!(arg, FnArg::Receiver(_)));
     if !has_self {
         return Err(syn::Error::new(
             span,
@@ -112,39 +151,39 @@ fn validate_trait_method(method: &syn::TraitItemFn) -> Result<(), syn::Error> {
 
     // Check self is by reference, not by value
     for arg in &method.sig.inputs {
-        if let FnArg::Receiver(receiver) = arg {
-            if receiver.reference.is_none() {
-                return Err(syn::Error::new(
-                    receiver.self_token.span(),
-                    format!(
-                        "method '{}': self by value is not supported. Use &self or &mut self instead",
-                        method_name
-                    ),
-                ));
-            }
+        if let FnArg::Receiver(receiver) = arg
+            && receiver.reference.is_none()
+        {
+            return Err(syn::Error::new(
+                receiver.self_token.span(),
+                format!(
+                    "method '{}': self by value is not supported. Use &self or &mut self instead",
+                    method_name
+                ),
+            ));
         }
     }
 
     // Check parameter types for FFI safety
     for arg in &method.sig.inputs {
-        if let FnArg::Typed(pat_type) = arg {
-            if let Err(msg) = check_ffi_safe_type(&pat_type.ty) {
-                return Err(syn::Error::new(
-                    pat_type.ty.span(),
-                    format!("method '{}': {}", method_name, msg),
-                ));
-            }
+        if let FnArg::Typed(pat_type) = arg
+            && let Err(msg) = check_ffi_safe_type(&pat_type.ty)
+        {
+            return Err(syn::Error::new(
+                pat_type.ty.span(),
+                format!("method '{}': {}", method_name, msg),
+            ));
         }
     }
 
     // Check return type for FFI safety
-    if let syn::ReturnType::Type(_, ty) = &method.sig.output {
-        if let Err(msg) = check_ffi_safe_type(ty) {
-            return Err(syn::Error::new(
-                ty.span(),
-                format!("method '{}': return type - {}", method_name, msg),
-            ));
-        }
+    if let syn::ReturnType::Type(_, ty) = &method.sig.output
+        && let Err(msg) = check_ffi_safe_type(ty)
+    {
+        return Err(syn::Error::new(
+            ty.span(),
+            format!("method '{}': return type - {}", method_name, msg),
+        ));
     }
 
     Ok(())
@@ -159,7 +198,10 @@ fn validate_impl_method(method: &syn::ImplItemFn) -> Result<(), syn::Error> {
     if method.sig.asyncness.is_some() {
         return Err(syn::Error::new(
             span,
-            format!("method '{}': async functions are not supported in C++ vtables", method_name),
+            format!(
+                "method '{}': async functions are not supported in C++ vtables",
+                method_name
+            ),
         ));
     }
 
@@ -167,12 +209,19 @@ fn validate_impl_method(method: &syn::ImplItemFn) -> Result<(), syn::Error> {
     if !method.sig.generics.params.is_empty() {
         return Err(syn::Error::new(
             span,
-            format!("method '{}': generic methods are not supported in C++ vtables", method_name),
+            format!(
+                "method '{}': generic methods are not supported in C++ vtables",
+                method_name
+            ),
         ));
     }
 
     // Check for self parameter
-    let has_self = method.sig.inputs.iter().any(|arg| matches!(arg, FnArg::Receiver(_)));
+    let has_self = method
+        .sig
+        .inputs
+        .iter()
+        .any(|arg| matches!(arg, FnArg::Receiver(_)));
     if !has_self {
         return Err(syn::Error::new(
             span,
@@ -185,39 +234,39 @@ fn validate_impl_method(method: &syn::ImplItemFn) -> Result<(), syn::Error> {
 
     // Check self is by reference, not by value
     for arg in &method.sig.inputs {
-        if let FnArg::Receiver(receiver) = arg {
-            if receiver.reference.is_none() {
-                return Err(syn::Error::new(
-                    receiver.self_token.span(),
-                    format!(
-                        "method '{}': self by value is not supported. Use &self or &mut self instead",
-                        method_name
-                    ),
-                ));
-            }
+        if let FnArg::Receiver(receiver) = arg
+            && receiver.reference.is_none()
+        {
+            return Err(syn::Error::new(
+                receiver.self_token.span(),
+                format!(
+                    "method '{}': self by value is not supported. Use &self or &mut self instead",
+                    method_name
+                ),
+            ));
         }
     }
 
     // Check parameter types for FFI safety
     for arg in &method.sig.inputs {
-        if let FnArg::Typed(pat_type) = arg {
-            if let Err(msg) = check_ffi_safe_type(&pat_type.ty) {
-                return Err(syn::Error::new(
-                    pat_type.ty.span(),
-                    format!("method '{}': {}", method_name, msg),
-                ));
-            }
+        if let FnArg::Typed(pat_type) = arg
+            && let Err(msg) = check_ffi_safe_type(&pat_type.ty)
+        {
+            return Err(syn::Error::new(
+                pat_type.ty.span(),
+                format!("method '{}': {}", method_name, msg),
+            ));
         }
     }
 
     // Check return type for FFI safety
-    if let syn::ReturnType::Type(_, ty) = &method.sig.output {
-        if let Err(msg) = check_ffi_safe_type(ty) {
-            return Err(syn::Error::new(
-                ty.span(),
-                format!("method '{}': return type - {}", method_name, msg),
-            ));
-        }
+    if let syn::ReturnType::Type(_, ty) = &method.sig.output
+        && let Err(msg) = check_ffi_safe_type(ty)
+    {
+        return Err(syn::Error::new(
+            ty.span(),
+            format!("method '{}': return type - {}", method_name, msg),
+        ));
     }
 
     Ok(())
@@ -231,7 +280,10 @@ fn validate_trait(input: &ItemTrait) -> Result<(), syn::Error> {
     if !input.generics.params.is_empty() {
         return Err(syn::Error::new(
             input.generics.span(),
-            format!("trait '{}': generic traits are not supported in C++ vtables", trait_name),
+            format!(
+                "trait '{}': generic traits are not supported in C++ vtables",
+                trait_name
+            ),
         ));
     }
 
@@ -262,8 +314,7 @@ fn validate_impl(input: &ItemImpl) -> Result<(), syn::Error> {
         }
     }
 
-    Ok(()
-    )
+    Ok(())
 }
 
 /// Parse #[slot(N)] attribute or #[doc(alias = "__slot:N")] from a list of attributes.
@@ -286,32 +337,25 @@ fn validate_impl(input: &ItemImpl) -> Result<(), syn::Error> {
 fn parse_slot_attr(attrs: &[Attribute]) -> Option<usize> {
     for attr in attrs {
         // Check for #[slot(N)] - direct proc-macro usage
-        if attr.path().is_ident("slot") {
-            if let Meta::List(meta_list) = &attr.meta {
-                let tokens = meta_list.tokens.clone();
-                if let Ok(expr) = syn::parse2::<Expr>(tokens) {
-                    if let Expr::Lit(expr_lit) = expr {
-                        if let Lit::Int(lit_int) = &expr_lit.lit {
-                            return lit_int.base10_parse::<usize>().ok();
-                        }
-                    }
-                }
-            }
+        if attr.path().is_ident("slot")
+            && let Meta::List(meta_list) = &attr.meta
+            && let Ok(Expr::Lit(expr_lit)) = syn::parse2::<Expr>(meta_list.tokens.clone())
+            && let Lit::Int(lit_int) = &expr_lit.lit
+        {
+            return lit_int.base10_parse::<usize>().ok();
         }
         // Check for #[doc(alias = "__slot:N")] - from declarative macros
-        if attr.path().is_ident("doc") {
-            if let Meta::List(meta_list) = &attr.meta {
-                let tokens_str = meta_list.tokens.to_string();
-                // Parse "alias = \"__slot:N\""
-                if let Some(alias_val) = tokens_str.strip_prefix("alias = \"") {
-                    if let Some(slot_str) = alias_val.strip_prefix("__slot:") {
-                        if let Some(num_str) = slot_str.strip_suffix('"') {
-                            if let Ok(slot) = num_str.parse::<usize>() {
-                                return Some(slot);
-                            }
-                        }
-                    }
-                }
+        if attr.path().is_ident("doc")
+            && let Meta::List(meta_list) = &attr.meta
+        {
+            let tokens_str = meta_list.tokens.to_string();
+            // Parse "alias = \"__slot:N\""
+            if let Some(alias_val) = tokens_str.strip_prefix("alias = \"")
+                && let Some(slot_str) = alias_val.strip_prefix("__slot:")
+                && let Some(num_str) = slot_str.strip_suffix('"')
+                && let Ok(slot) = num_str.parse::<usize>()
+            {
+                return Some(slot);
             }
         }
     }
@@ -325,15 +369,15 @@ fn parse_slot_overrides(attr: TokenStream) -> std::collections::HashMap<String, 
     let attr_str = attr.to_string();
 
     // Parse "slots(method1 = 3, method2 = 5, ...)"
-    if let Some(inner) = attr_str.strip_prefix("slots").map(|s| s.trim()) {
-        if let Some(inner) = inner.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
-            for assignment in inner.split(',') {
-                let parts: Vec<&str> = assignment.split('=').collect();
-                if parts.len() == 2 {
-                    let method = parts[0].trim();
-                    if let Ok(slot) = parts[1].trim().parse::<usize>() {
-                        overrides.insert(method.to_string(), slot);
-                    }
+    if let Some(inner) = attr_str.strip_prefix("slots").map(|s| s.trim())
+        && let Some(inner) = inner.strip_prefix('(').and_then(|s| s.strip_suffix(')'))
+    {
+        for assignment in inner.split(',') {
+            let parts: Vec<&str> = assignment.split('=').collect();
+            if parts.len() == 2 {
+                let method = parts[0].trim();
+                if let Ok(slot) = parts[1].trim().parse::<usize>() {
+                    overrides.insert(method.to_string(), slot);
                 }
             }
         }
@@ -359,7 +403,7 @@ fn interface_to_field_name(interface: &Ident) -> Ident {
             //   next char exists and is lowercase (handles "IA" in "IAnimal")
             if i > 0 {
                 let prev_lower = chars[i - 1].is_lowercase();
-                let next_lower = chars.get(i + 1).map_or(false, |c| c.is_lowercase());
+                let next_lower = chars.get(i + 1).is_some_and(|c| c.is_lowercase());
                 if prev_lower || next_lower {
                     result.push('_');
                 }
@@ -390,7 +434,7 @@ fn cppvtable_internal(attr: TokenStream, input: ItemTrait) -> Result<TokenStream
         slot: usize,
         name: Ident,
         param_names: Vec<Ident>,
-        param_types: Vec<Box<Type>>,
+        param_types: Vec<Type>,
         output: syn::ReturnType,
     }
 
@@ -436,12 +480,12 @@ fn cppvtable_internal(attr: TokenStream, input: ItemTrait) -> Result<TokenStream
                 .inputs
                 .iter()
                 .filter_map(|arg| {
-                    if let FnArg::Typed(pat_type) = arg {
-                        if let Pat::Ident(pat_ident) = pat_type.pat.as_ref() {
-                            let name = &pat_ident.ident;
-                            let ty = &pat_type.ty;
-                            return Some((name.clone(), ty.clone()));
-                        }
+                    if let FnArg::Typed(pat_type) = arg
+                        && let Pat::Ident(pat_ident) = pat_type.pat.as_ref()
+                    {
+                        let name = &pat_ident.ident;
+                        let ty = pat_type.ty.as_ref();
+                        return Some((name.clone(), ty.clone()));
                     }
                     None
                 })
@@ -655,7 +699,7 @@ fn cppvtable_impl_impl(interface_name: Ident, input: ItemImpl) -> Result<TokenSt
         slot: usize,
         name: Ident,
         param_names: Vec<Ident>,
-        param_types: Vec<Box<Type>>,
+        param_types: Vec<Type>,
         output: syn::ReturnType,
         is_mut: bool,
         original: syn::ImplItemFn,
@@ -692,22 +736,23 @@ fn cppvtable_impl_impl(interface_name: Ident, input: ItemImpl) -> Result<TokenSt
                 .inputs
                 .iter()
                 .filter_map(|arg| {
-                    if let FnArg::Typed(pat_type) = arg {
-                        if let Pat::Ident(pat_ident) = pat_type.pat.as_ref() {
-                            let name = &pat_ident.ident;
-                            let ty = &pat_type.ty;
-                            return Some((name.clone(), ty.clone()));
-                        }
+                    if let FnArg::Typed(pat_type) = arg
+                        && let Pat::Ident(pat_ident) = pat_type.pat.as_ref()
+                    {
+                        let name = &pat_ident.ident;
+                        let ty = pat_type.ty.as_ref();
+                        return Some((name.clone(), ty.clone()));
                     }
                     None
                 })
                 .collect();
 
             // Check if method takes &self or &mut self
-            let is_mut = method.sig.inputs.first().map_or(
-                false,
-                |arg| matches!(arg, FnArg::Receiver(r) if r.mutability.is_some()),
-            );
+            let is_mut = method
+                .sig
+                .inputs
+                .first()
+                .is_some_and(|arg| matches!(arg, FnArg::Receiver(r) if r.mutability.is_some()));
 
             methods.push(ImplMethodInfo {
                 slot,

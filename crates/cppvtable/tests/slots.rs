@@ -47,6 +47,12 @@ impl SlotTester {
     }
 }
 
+impl Default for SlotTester {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SlotTester {
     pub fn new() -> Self {
         SlotTester {
@@ -112,6 +118,12 @@ impl StartsAtThreeTester {
     }
     fn second_method(&self) -> i32 {
         4
+    }
+}
+
+impl Default for StartsAtThreeTester {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
