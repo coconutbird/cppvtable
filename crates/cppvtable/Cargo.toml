@@ -9,4 +9,3 @@ repository = "https://github.com/coconutbird/cppvtable"
 [dependencies]
 paste = "1.0"
 cppvtable-macro = { path = "../cppvtable-macro" }
-

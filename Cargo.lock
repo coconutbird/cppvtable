@@ -86,6 +86,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cppvtable-cpp-tests"
+version = "0.1.0"
+dependencies = [
+ "cpp",
+ "cpp_build",
+ "cppvtable",
+]
+
+[[package]]
 name = "cppvtable-examples"
 version = "0.1.0"
 dependencies = [
