@@ -416,8 +416,8 @@ impl Duck {
     /// Cast to IFlyer (secondary interface - requires this-adjustment)
     pub fn as_flyer(&self) -> &IFlyer {
         unsafe {
-            let ptr = (self as *const Self as *const u8)
-                .add(std::mem::offset_of!(Self, vtable_i_flyer));
+            let ptr =
+                (self as *const Self as *const u8).add(std::mem::offset_of!(Self, vtable_i_flyer));
             &*(ptr as *const IFlyer)
         }
     }

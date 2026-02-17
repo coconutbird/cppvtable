@@ -17,9 +17,11 @@ use syn::{
     parse_macro_input,
 };
 
-/// Parse #[slot(N)] attribute from a list of attributes
+/// Parse #[slot(N)] attribute or #[doc(alias = "__slot:N")] from a list of attributes
+/// The doc(alias) form is used by declarative macros since custom attributes are stripped
 fn parse_slot_attr(attrs: &[Attribute]) -> Option<usize> {
     for attr in attrs {
+        // Check for #[slot(N)] - direct proc-macro usage
         if attr.path().is_ident("slot") {
             if let Meta::List(meta_list) = &attr.meta {
                 let tokens = meta_list.tokens.clone();
@@ -32,8 +34,48 @@ fn parse_slot_attr(attrs: &[Attribute]) -> Option<usize> {
                 }
             }
         }
+        // Check for #[doc(alias = "__slot:N")] - from declarative macros
+        if attr.path().is_ident("doc") {
+            if let Meta::List(meta_list) = &attr.meta {
+                let tokens_str = meta_list.tokens.to_string();
+                // Parse "alias = \"__slot:N\""
+                if let Some(alias_val) = tokens_str.strip_prefix("alias = \"") {
+                    if let Some(slot_str) = alias_val.strip_prefix("__slot:") {
+                        if let Some(num_str) = slot_str.strip_suffix('"') {
+                            if let Ok(slot) = num_str.parse::<usize>() {
+                                return Some(slot);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
     None
+}
+
+/// Parse slot overrides from attribute: slots(method_name = N, ...)
+/// Returns a map of method name -> slot index
+fn parse_slot_overrides(attr: TokenStream) -> std::collections::HashMap<String, usize> {
+    let mut overrides = std::collections::HashMap::new();
+    let attr_str = attr.to_string();
+
+    // Parse "slots(method1 = 3, method2 = 5, ...)"
+    if let Some(inner) = attr_str.strip_prefix("slots").map(|s| s.trim()) {
+        if let Some(inner) = inner.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
+            for assignment in inner.split(',') {
+                let parts: Vec<&str> = assignment.split('=').collect();
+                if parts.len() == 2 {
+                    let method = parts[0].trim();
+                    if let Ok(slot) = parts[1].trim().parse::<usize>() {
+                        overrides.insert(method.to_string(), slot);
+                    }
+                }
+            }
+        }
+    }
+
+    overrides
 }
 
 /// Convert interface name to vtable field name (snake_case with vtable_ prefix)
@@ -87,11 +129,14 @@ fn interface_to_field_name(interface: &Ident) -> Ident {
 /// }
 /// ```
 #[proc_macro_attribute]
-pub fn cpp_interface(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn cpp_interface(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemTrait);
     let trait_name = &input.ident;
     let vtable_name = format_ident!("{}VTable", trait_name);
     let vis = &input.vis;
+
+    // Parse slot mappings from attribute: slots(method_name = N, ...)
+    let slot_overrides = parse_slot_overrides(attr);
 
     // Collect methods with their slot indices
     struct MethodInfo {
@@ -110,8 +155,16 @@ pub fn cpp_interface(_attr: TokenStream, item: TokenStream) -> TokenStream {
             let method_name = method.sig.ident.clone();
             let output = method.sig.output.clone();
 
-            // Check for #[slot(N)] attribute
-            let slot = if let Some(explicit_slot) = parse_slot_attr(&method.attrs) {
+            // Check for slot override from attribute, then #[slot(N)] on method
+            let slot = if let Some(&explicit_slot) = slot_overrides.get(&method_name.to_string()) {
+                if explicit_slot < next_slot {
+                    panic!(
+                        "slot({}) for method '{}' would overlap with previous slots (next available: {})",
+                        explicit_slot, method_name, next_slot
+                    );
+                }
+                explicit_slot
+            } else if let Some(explicit_slot) = parse_slot_attr(&method.attrs) {
                 if explicit_slot < next_slot {
                     panic!(
                         "slot({}) for method '{}' would overlap with previous slots (next available: {})",
@@ -372,7 +425,8 @@ pub fn implement(attr: TokenStream, item: TokenStream) -> TokenStream {
         // Fill gaps with dummy panic stubs
         while current_slot < method.slot {
             let dummy_name = format_ident!("__reserved_slot_{}", current_slot);
-            let dummy_wrapper = format_ident!("__{}__{}__{}", struct_name, interface_name, dummy_name);
+            let dummy_wrapper =
+                format_ident!("__{}__{}__{}", struct_name, interface_name, dummy_name);
 
             wrapper_fns.push(quote! {
                 #[allow(non_snake_case)]
@@ -466,10 +520,7 @@ pub fn implement(attr: TokenStream, item: TokenStream) -> TokenStream {
     );
 
     // Generate const name matching field naming convention: vtable_i_foo -> VTABLE_I_FOO
-    let vtable_const_name = format_ident!(
-        "{}",
-        vtable_field.to_string().to_uppercase()
-    );
+    let vtable_const_name = format_ident!("{}", vtable_field.to_string().to_uppercase());
 
     let expanded = quote! {
         // The wrapper functions (private)

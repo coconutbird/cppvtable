@@ -61,25 +61,27 @@ macro_rules! define_interface {
     };
 
     // Single interface - collect methods then emit trait
+    // Start with empty collected methods and empty slots accumulator
     (@single
         $(#[$meta:meta])*
         interface $name:ident {
             $($body:tt)*
         }
     ) => {
-        $crate::define_interface!(@collect $name, [$(#[$meta])*], { $($body)* }, []);
+        $crate::define_interface!(@collect $name, [$(#[$meta])*], { $($body)* }, [], []);
     };
 
     // Collect: method with explicit slot [N]
+    // Stores slot info to pass via cpp_interface attribute argument
     (@collect $name:ident, [$($meta:tt)*], {
         $(#[$method_meta:meta])*
         [$slot:expr] fn $method:ident (&self $(, $pname:ident : $pty:ty)*) $(-> $ret:ty)?;
         $($rest:tt)*
-    }, [$($collected:tt)*]) => {
+    }, [$($collected:tt)*], [$($slots:tt)*]) => {
         $crate::define_interface!(@collect $name, [$($meta)*], { $($rest)* }, [
             $($collected)*
-            { #[slot($slot)] $(#[$method_meta])* fn $method(&self $(, $pname: $pty)*) $(-> $ret)?; }
-        ]);
+            { $(#[$method_meta])* fn $method(&self $(, $pname: $pty)*) $(-> $ret)?; }
+        ], [$($slots)* $method = $slot,]);
     };
 
     // Collect: method with explicit slot [N] and &mut self
@@ -87,11 +89,11 @@ macro_rules! define_interface {
         $(#[$method_meta:meta])*
         [$slot:expr] fn $method:ident (&mut self $(, $pname:ident : $pty:ty)*) $(-> $ret:ty)?;
         $($rest:tt)*
-    }, [$($collected:tt)*]) => {
+    }, [$($collected:tt)*], [$($slots:tt)*]) => {
         $crate::define_interface!(@collect $name, [$($meta)*], { $($rest)* }, [
             $($collected)*
-            { #[slot($slot)] $(#[$method_meta])* fn $method(&mut self $(, $pname: $pty)*) $(-> $ret)?; }
-        ]);
+            { $(#[$method_meta])* fn $method(&mut self $(, $pname: $pty)*) $(-> $ret)?; }
+        ], [$($slots)* $method = $slot,]);
     };
 
     // Collect: method without explicit slot (&self)
@@ -99,11 +101,11 @@ macro_rules! define_interface {
         $(#[$method_meta:meta])*
         fn $method:ident (&self $(, $pname:ident : $pty:ty)*) $(-> $ret:ty)?;
         $($rest:tt)*
-    }, [$($collected:tt)*]) => {
+    }, [$($collected:tt)*], [$($slots:tt)*]) => {
         $crate::define_interface!(@collect $name, [$($meta)*], { $($rest)* }, [
             $($collected)*
             { $(#[$method_meta])* fn $method(&self $(, $pname: $pty)*) $(-> $ret)?; }
-        ]);
+        ], [$($slots)*]);
     };
 
     // Collect: method without explicit slot (&mut self)
@@ -111,15 +113,24 @@ macro_rules! define_interface {
         $(#[$method_meta:meta])*
         fn $method:ident (&mut self $(, $pname:ident : $pty:ty)*) $(-> $ret:ty)?;
         $($rest:tt)*
-    }, [$($collected:tt)*]) => {
+    }, [$($collected:tt)*], [$($slots:tt)*]) => {
         $crate::define_interface!(@collect $name, [$($meta)*], { $($rest)* }, [
             $($collected)*
             { $(#[$method_meta])* fn $method(&mut self $(, $pname: $pty)*) $(-> $ret)?; }
-        ]);
+        ], [$($slots)*]);
     };
 
-    // Terminal: emit the trait with cpp_interface attribute
-    (@collect $name:ident, [$($meta:tt)*], {}, [$({ $($method:tt)* })*]) => {
+    // Terminal: emit the trait with cpp_interface attribute (with slots)
+    (@collect $name:ident, [$($meta:tt)*], {}, [$({ $($method:tt)* })*], [$($slots:tt)+]) => {
+        $($meta)*
+        #[$crate::proc::cpp_interface(slots($($slots)*))]
+        pub trait $name {
+            $($($method)*)*
+        }
+    };
+
+    // Terminal: emit the trait with cpp_interface attribute (no slots)
+    (@collect $name:ident, [$($meta:tt)*], {}, [$({ $($method:tt)* })*], []) => {
         $($meta)*
         #[$crate::proc::cpp_interface]
         pub trait $name {
