@@ -24,6 +24,248 @@ use syn::{
     parse_macro_input, spanned::Spanned,
 };
 
+// =============================================================================
+// Validation helpers for FFI-safety and C++ compatibility
+// =============================================================================
+
+/// Check if a type is known to be non-FFI-safe
+fn check_ffi_safe_type(ty: &Type) -> Result<(), String> {
+    match ty {
+        Type::Path(type_path) => {
+            if let Some(segment) = type_path.path.segments.last() {
+                let name = segment.ident.to_string();
+                match name.as_str() {
+                    // Rust-specific types that are not FFI-safe
+                    "String" => return Err("String is not FFI-safe. Use *const c_char or *const u8 instead".into()),
+                    "Vec" => return Err("Vec<T> is not FFI-safe. Use *const T and a length parameter instead".into()),
+                    "Box" => return Err("Box<T> is not FFI-safe. Use *mut T instead".into()),
+                    "Rc" | "Arc" => return Err(format!("{} is not FFI-safe. Use raw pointers instead", name)),
+                    "Option" => {
+                        // Option<NonNull<T>> and Option<fn> are FFI-safe, but Option<T> generally isn't
+                        // We'll allow it with a note that the user should be careful
+                    }
+                    "Result" => return Err("Result<T, E> is not FFI-safe. Use error codes or out-parameters instead".into()),
+                    "str" => return Err("str is not FFI-safe. Use *const c_char or *const u8 instead".into()),
+                    _ => {}
+                }
+            }
+        }
+        Type::Reference(type_ref) => {
+            // References other than &self/&mut self should be warned about
+            // But we can't easily distinguish &self here, so we'll check in the method validation
+            let mutability = if type_ref.mutability.is_some() { "&mut " } else { "&" };
+            return Err(format!(
+                "{}T references are not recommended for FFI. Use *const T or *mut T instead. \
+                 References have Rust-specific guarantees that C++ won't uphold",
+                mutability
+            ));
+        }
+        Type::Slice(_) => {
+            return Err("Slices [T] are not FFI-safe. Use *const T and a length parameter instead".into());
+        }
+        Type::TraitObject(_) => {
+            return Err("Trait objects (dyn Trait) are not FFI-safe".into());
+        }
+        Type::ImplTrait(_) => {
+            return Err("impl Trait is not FFI-safe".into());
+        }
+        Type::Tuple(tuple) if !tuple.elems.is_empty() => {
+            return Err("Non-empty tuples are not FFI-safe. Use a #[repr(C)] struct instead".into());
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Validate a trait method signature for C++ vtable compatibility
+fn validate_trait_method(method: &syn::TraitItemFn) -> Result<(), syn::Error> {
+    let method_name = &method.sig.ident;
+    let span = method_name.span();
+
+    // Check for async
+    if method.sig.asyncness.is_some() {
+        return Err(syn::Error::new(
+            span,
+            format!("method '{}': async functions are not supported in C++ vtables", method_name),
+        ));
+    }
+
+    // Check for generics
+    if !method.sig.generics.params.is_empty() {
+        return Err(syn::Error::new(
+            span,
+            format!("method '{}': generic methods are not supported in C++ vtables", method_name),
+        ));
+    }
+
+    // Check for self parameter
+    let has_self = method.sig.inputs.iter().any(|arg| matches!(arg, FnArg::Receiver(_)));
+    if !has_self {
+        return Err(syn::Error::new(
+            span,
+            format!(
+                "method '{}': must have &self or &mut self parameter (C++ vtable methods require a this pointer)",
+                method_name
+            ),
+        ));
+    }
+
+    // Check self is by reference, not by value
+    for arg in &method.sig.inputs {
+        if let FnArg::Receiver(receiver) = arg {
+            if receiver.reference.is_none() {
+                return Err(syn::Error::new(
+                    receiver.self_token.span(),
+                    format!(
+                        "method '{}': self by value is not supported. Use &self or &mut self instead",
+                        method_name
+                    ),
+                ));
+            }
+        }
+    }
+
+    // Check parameter types for FFI safety
+    for arg in &method.sig.inputs {
+        if let FnArg::Typed(pat_type) = arg {
+            if let Err(msg) = check_ffi_safe_type(&pat_type.ty) {
+                return Err(syn::Error::new(
+                    pat_type.ty.span(),
+                    format!("method '{}': {}", method_name, msg),
+                ));
+            }
+        }
+    }
+
+    // Check return type for FFI safety
+    if let syn::ReturnType::Type(_, ty) = &method.sig.output {
+        if let Err(msg) = check_ffi_safe_type(ty) {
+            return Err(syn::Error::new(
+                ty.span(),
+                format!("method '{}': return type - {}", method_name, msg),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Validate an impl method signature for C++ vtable compatibility
+fn validate_impl_method(method: &syn::ImplItemFn) -> Result<(), syn::Error> {
+    let method_name = &method.sig.ident;
+    let span = method_name.span();
+
+    // Check for async
+    if method.sig.asyncness.is_some() {
+        return Err(syn::Error::new(
+            span,
+            format!("method '{}': async functions are not supported in C++ vtables", method_name),
+        ));
+    }
+
+    // Check for generics
+    if !method.sig.generics.params.is_empty() {
+        return Err(syn::Error::new(
+            span,
+            format!("method '{}': generic methods are not supported in C++ vtables", method_name),
+        ));
+    }
+
+    // Check for self parameter
+    let has_self = method.sig.inputs.iter().any(|arg| matches!(arg, FnArg::Receiver(_)));
+    if !has_self {
+        return Err(syn::Error::new(
+            span,
+            format!(
+                "method '{}': must have &self or &mut self parameter (C++ vtable methods require a this pointer)",
+                method_name
+            ),
+        ));
+    }
+
+    // Check self is by reference, not by value
+    for arg in &method.sig.inputs {
+        if let FnArg::Receiver(receiver) = arg {
+            if receiver.reference.is_none() {
+                return Err(syn::Error::new(
+                    receiver.self_token.span(),
+                    format!(
+                        "method '{}': self by value is not supported. Use &self or &mut self instead",
+                        method_name
+                    ),
+                ));
+            }
+        }
+    }
+
+    // Check parameter types for FFI safety
+    for arg in &method.sig.inputs {
+        if let FnArg::Typed(pat_type) = arg {
+            if let Err(msg) = check_ffi_safe_type(&pat_type.ty) {
+                return Err(syn::Error::new(
+                    pat_type.ty.span(),
+                    format!("method '{}': {}", method_name, msg),
+                ));
+            }
+        }
+    }
+
+    // Check return type for FFI safety
+    if let syn::ReturnType::Type(_, ty) = &method.sig.output {
+        if let Err(msg) = check_ffi_safe_type(ty) {
+            return Err(syn::Error::new(
+                ty.span(),
+                format!("method '{}': return type - {}", method_name, msg),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Validate a trait definition for C++ vtable compatibility
+fn validate_trait(input: &ItemTrait) -> Result<(), syn::Error> {
+    let trait_name = &input.ident;
+
+    // Check for generics on the trait itself
+    if !input.generics.params.is_empty() {
+        return Err(syn::Error::new(
+            input.generics.span(),
+            format!("trait '{}': generic traits are not supported in C++ vtables", trait_name),
+        ));
+    }
+
+    // Validate each method
+    for item in &input.items {
+        if let TraitItem::Fn(method) = item {
+            validate_trait_method(method)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Validate an impl block for C++ vtable compatibility
+fn validate_impl(input: &ItemImpl) -> Result<(), syn::Error> {
+    // Check for generics on the impl
+    if !input.generics.params.is_empty() {
+        return Err(syn::Error::new(
+            input.generics.span(),
+            "generic impl blocks are not supported in C++ vtables",
+        ));
+    }
+
+    // Validate each method
+    for item in &input.items {
+        if let ImplItem::Fn(method) = item {
+            validate_impl_method(method)?;
+        }
+    }
+
+    Ok(()
+    )
+}
+
 /// Parse #[slot(N)] attribute or #[doc(alias = "__slot:N")] from a list of attributes.
 ///
 /// # Slot Attribute Mechanism
@@ -133,6 +375,9 @@ fn interface_to_field_name(interface: &Ident) -> Ident {
 
 /// Internal implementation of cppvtable
 fn cppvtable_internal(attr: TokenStream, input: ItemTrait) -> Result<TokenStream2, syn::Error> {
+    // Validate trait for C++ vtable compatibility
+    validate_trait(&input)?;
+
     let trait_name = &input.ident;
     let vtable_name = format_ident!("{}VTable", trait_name);
     let vis = &input.vis;
@@ -393,6 +638,9 @@ pub fn cppvtable(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Internal implementation of cppvtable_impl
 fn cppvtable_impl_impl(interface_name: Ident, input: ItemImpl) -> Result<TokenStream2, syn::Error> {
+    // Validate impl block for C++ vtable compatibility
+    validate_impl(&input)?;
+
     let struct_type = &input.self_ty;
     let vtable_name = format_ident!("{}VTable", interface_name);
 
