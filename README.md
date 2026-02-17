@@ -92,12 +92,12 @@ unsafe {
 
 ## Feature Comparison
 
-| Feature            | Declarative | Proc-macro   |
-| ------------------ | ----------- | ------------ |
-| Slot indices `[N]` | ✅          | ❌ (planned) |
-| thiscall (x86)     | ✅          | ❌ (planned) |
-| Clean Rust syntax  | ❌          | ✅           |
-| No separate crate  | ✅          | N/A          |
+| Feature            | Declarative        | Proc-macro         |
+| ------------------ | ------------------ | ------------------ |
+| Slot indices       | ✅ `[N] fn method` | ✅ `#[slot(N)]`    |
+| thiscall (x86)     | ✅                 | ✅                 |
+| Clean Rust syntax  | ❌                 | ✅                 |
+| No separate crate  | ✅                 | N/A                |
 
 ## Project Structure
 
