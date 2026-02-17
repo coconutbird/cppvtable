@@ -7,16 +7,34 @@
 //! Automatically selects calling convention based on target:
 //! - x86: `thiscall` (this in ECX)
 //! - x64: `C` (this as first param)
+//!
+//! Supports explicit slot indices via `#[slot(N)]` attribute on methods.
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
-    parse_macro_input, FnArg, Ident, ImplItem, ItemImpl, ItemTrait, Pat, TraitItem, Type,
+    Attribute, Expr, FnArg, Ident, ImplItem, ItemImpl, ItemTrait, Lit, Meta, Pat, TraitItem, Type,
+    parse_macro_input,
 };
 
-// Note: For proper thiscall support on x86, we'd need to generate different
-// extern ABIs based on target. For now, using extern "C" which works on x64
-// and is compatible with cdecl on x86. Real x86 MSVC interop would need thiscall.
+/// Parse #[slot(N)] attribute from a list of attributes
+fn parse_slot_attr(attrs: &[Attribute]) -> Option<usize> {
+    for attr in attrs {
+        if attr.path().is_ident("slot") {
+            if let Meta::List(meta_list) = &attr.meta {
+                let tokens = meta_list.tokens.clone();
+                if let Ok(expr) = syn::parse2::<Expr>(tokens) {
+                    if let Expr::Lit(expr_lit) = expr {
+                        if let Lit::Int(lit_int) = &expr_lit.lit {
+                            return lit_int.base10_parse::<usize>().ok();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
 
 /// Define a C++ compatible interface.
 ///
@@ -24,13 +42,17 @@ use syn::{
 /// - A vtable struct `{Name}VTable` with function pointers
 /// - A base struct `{Name}` with just the vtable pointer
 ///
+/// Supports `#[slot(N)]` attribute to specify explicit vtable slot indices.
+/// Gaps are filled with dummy entries that panic if called.
+///
 /// # Example
 /// ```ignore
 /// #[cpp_interface]
 /// pub trait IAnimal {
-///     fn destructor(&mut self, flags: u8) -> *mut c_void;
-///     fn speak(&self);
-///     fn legs(&self) -> i32;
+///     fn speak(&self);           // slot 0
+///     #[slot(5)]
+///     fn jump(&self);            // slot 5 (slots 1-4 filled with dummies)
+///     fn legs(&self) -> i32;     // slot 6
 /// }
 /// ```
 #[proc_macro_attribute]
@@ -40,14 +62,36 @@ pub fn cpp_interface(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let vtable_name = format_ident!("{}VTable", trait_name);
     let vis = &input.vis;
 
-    // Extract methods from trait
-    let mut vtable_fields = Vec::new();
-    let mut wrapper_methods = Vec::new();
+    // Collect methods with their slot indices
+    struct MethodInfo {
+        slot: usize,
+        name: Ident,
+        param_names: Vec<Ident>,
+        param_types: Vec<Box<Type>>,
+        output: syn::ReturnType,
+    }
+
+    let mut methods: Vec<MethodInfo> = Vec::new();
+    let mut next_slot = 0usize;
 
     for item in &input.items {
         if let TraitItem::Fn(method) = item {
-            let method_name = &method.sig.ident;
-            let output = &method.sig.output;
+            let method_name = method.sig.ident.clone();
+            let output = method.sig.output.clone();
+
+            // Check for #[slot(N)] attribute
+            let slot = if let Some(explicit_slot) = parse_slot_attr(&method.attrs) {
+                if explicit_slot < next_slot {
+                    panic!(
+                        "slot({}) for method '{}' would overlap with previous slots (next available: {})",
+                        explicit_slot, method_name, next_slot
+                    );
+                }
+                explicit_slot
+            } else {
+                next_slot
+            };
+            next_slot = slot + 1;
 
             // Collect parameter names and types (skip self)
             let params: Vec<_> = method
@@ -66,30 +110,71 @@ pub fn cpp_interface(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 })
                 .collect();
 
-            let param_names: Vec<_> = params.iter().map(|(n, _)| n).collect();
-            let param_types: Vec<_> = params.iter().map(|(_, t)| t).collect();
-
-            // Generate vtable field (function pointer)
-            vtable_fields.push(quote! {
-                pub #method_name: unsafe extern "C" fn(
-                    this: *mut std::ffi::c_void
-                    #(, #param_names: #param_types)*
-                ) #output
-            });
-
-            // Generate wrapper method on the base struct
-            wrapper_methods.push(quote! {
-                #[inline]
-                pub unsafe fn #method_name(&mut self #(, #param_names: #param_types)*) #output {
-                    unsafe {
-                        ((*self.vtable).#method_name)(
-                            self as *mut Self as *mut std::ffi::c_void
-                            #(, #param_names)*
-                        )
-                    }
-                }
+            methods.push(MethodInfo {
+                slot,
+                name: method_name,
+                param_names: params.iter().map(|(n, _)| n.clone()).collect(),
+                param_types: params.iter().map(|(_, t)| t.clone()).collect(),
+                output,
             });
         }
+    }
+
+    // Sort by slot index
+    methods.sort_by_key(|m| m.slot);
+
+    // Generate vtable fields, filling gaps with dummy entries
+    let mut vtable_fields = Vec::new();
+    let mut wrapper_methods = Vec::new();
+    let mut current_slot = 0usize;
+
+    for method in &methods {
+        // Fill gaps with dummy entries
+        while current_slot < method.slot {
+            let dummy_name = format_ident!("__reserved_slot_{}", current_slot);
+            vtable_fields.push(quote! {
+                #[cfg(target_arch = "x86")]
+                pub #dummy_name: unsafe extern "thiscall" fn(this: *mut std::ffi::c_void),
+                #[cfg(not(target_arch = "x86"))]
+                pub #dummy_name: unsafe extern "C" fn(this: *mut std::ffi::c_void)
+            });
+            current_slot += 1;
+        }
+
+        let method_name = &method.name;
+        let param_names = &method.param_names;
+        let param_types = &method.param_types;
+        let output = &method.output;
+
+        // Generate vtable field (function pointer)
+        // x86: thiscall (this in ECX), x64: C calling convention
+        vtable_fields.push(quote! {
+            #[cfg(target_arch = "x86")]
+            pub #method_name: unsafe extern "thiscall" fn(
+                this: *mut std::ffi::c_void
+                #(, #param_names: #param_types)*
+            ) #output,
+            #[cfg(not(target_arch = "x86"))]
+            pub #method_name: unsafe extern "C" fn(
+                this: *mut std::ffi::c_void
+                #(, #param_names: #param_types)*
+            ) #output
+        });
+
+        // Generate wrapper method on the base struct
+        wrapper_methods.push(quote! {
+            #[inline]
+            pub unsafe fn #method_name(&mut self #(, #param_names: #param_types)*) #output {
+                unsafe {
+                    ((*self.vtable).#method_name)(
+                        self as *mut Self as *mut std::ffi::c_void
+                        #(, #param_names)*
+                    )
+                }
+            }
+        });
+
+        current_slot += 1;
     }
 
     let expanded = quote! {
@@ -142,16 +227,20 @@ pub fn cpp_interface(_attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// This generates:
 /// - Static vtable instance
-/// - `extern "C"` wrapper functions that cast `this` and call your methods
+/// - Wrapper functions that cast `this` and call your methods
 /// - A `new()` helper or vtable accessor
+///
+/// Supports `#[slot(N)]` attribute to specify explicit vtable slot indices.
+/// Must match the slot indices used in the corresponding `#[cpp_interface]`.
 ///
 /// # Example
 /// ```ignore
 /// #[implement(IAnimal)]
 /// impl Dog {
-///     fn destructor(&mut self, flags: u8) -> *mut c_void { ... }
-///     fn speak(&self) { println!("Woof!"); }
-///     fn legs(&self) -> i32 { 4 }
+///     fn speak(&self) { println!("Woof!"); }  // slot 0
+///     #[slot(5)]
+///     fn jump(&self) { }                       // slot 5
+///     fn legs(&self) -> i32 { 4 }              // slot 6
 /// }
 /// ```
 #[proc_macro_attribute]
@@ -168,15 +257,40 @@ pub fn implement(attr: TokenStream, item: TokenStream) -> TokenStream {
         _ => panic!("Expected a type path"),
     };
 
-    let mut wrapper_fns = Vec::new();
-    let mut vtable_entries = Vec::new();
-    let mut original_methods = Vec::new();
+    // Collect methods with their slot indices
+    struct ImplMethodInfo {
+        slot: usize,
+        name: Ident,
+        wrapper_name: Ident,
+        param_names: Vec<Ident>,
+        param_types: Vec<Box<Type>>,
+        output: syn::ReturnType,
+        is_mut: bool,
+        original: syn::ImplItemFn,
+    }
+
+    let mut methods: Vec<ImplMethodInfo> = Vec::new();
+    let mut next_slot = 0usize;
 
     for item in &input.items {
         if let ImplItem::Fn(method) = item {
-            let method_name = &method.sig.ident;
+            let method_name = method.sig.ident.clone();
             let wrapper_name = format_ident!("__{}__{}", struct_name, method_name);
-            let output = &method.sig.output;
+            let output = method.sig.output.clone();
+
+            // Check for #[slot(N)] attribute
+            let slot = if let Some(explicit_slot) = parse_slot_attr(&method.attrs) {
+                if explicit_slot < next_slot {
+                    panic!(
+                        "slot({}) for method '{}' would overlap with previous slots (next available: {})",
+                        explicit_slot, method_name, next_slot
+                    );
+                }
+                explicit_slot
+            } else {
+                next_slot
+            };
+            next_slot = slot + 1;
 
             // Collect parameters (skip self)
             let params: Vec<_> = method
@@ -195,42 +309,112 @@ pub fn implement(attr: TokenStream, item: TokenStream) -> TokenStream {
                 })
                 .collect();
 
-            let param_names: Vec<_> = params.iter().map(|(n, _)| n).collect();
-            let param_types: Vec<_> = params.iter().map(|(_, t)| t).collect();
-
             // Check if method takes &self or &mut self
-            let is_mut = method.sig.inputs.first().map_or(false, |arg| {
-                matches!(arg, FnArg::Receiver(r) if r.mutability.is_some())
+            let is_mut = method.sig.inputs.first().map_or(
+                false,
+                |arg| matches!(arg, FnArg::Receiver(r) if r.mutability.is_some()),
+            );
+
+            methods.push(ImplMethodInfo {
+                slot,
+                name: method_name,
+                wrapper_name,
+                param_names: params.iter().map(|(n, _)| n.clone()).collect(),
+                param_types: params.iter().map(|(_, t)| t.clone()).collect(),
+                output,
+                is_mut,
+                original: method.clone(),
             });
+        }
+    }
 
-            let this_cast = if is_mut {
-                quote! { &mut *(this as *mut #struct_type) }
-            } else {
-                quote! { &*(this as *const #struct_type) }
-            };
+    // Sort by slot index
+    methods.sort_by_key(|m| m.slot);
 
-            // Generate extern "C" wrapper
+    // Generate wrapper functions and vtable entries, filling gaps
+    let mut wrapper_fns = Vec::new();
+    let mut vtable_entries = Vec::new();
+    let mut original_methods = Vec::new();
+    let mut current_slot = 0usize;
+
+    for method in &methods {
+        // Fill gaps with dummy panic stubs
+        while current_slot < method.slot {
+            let dummy_name = format_ident!("__reserved_slot_{}", current_slot);
+            let dummy_wrapper = format_ident!("__{}__{}", struct_name, dummy_name);
+
             wrapper_fns.push(quote! {
                 #[allow(non_snake_case)]
-                unsafe extern "C" fn #wrapper_name(
-                    this: *mut std::ffi::c_void
-                    #(, #param_names: #param_types)*
-                ) #output {
-                    unsafe {
-                        let obj = #this_cast;
-                        obj.#method_name(#(#param_names),*)
-                    }
+                #[cfg(target_arch = "x86")]
+                unsafe extern "thiscall" fn #dummy_wrapper(_this: *mut std::ffi::c_void) {
+                    panic!("Called reserved vtable slot {}", #current_slot);
+                }
+
+                #[allow(non_snake_case)]
+                #[cfg(not(target_arch = "x86"))]
+                unsafe extern "C" fn #dummy_wrapper(_this: *mut std::ffi::c_void) {
+                    panic!("Called reserved vtable slot {}", #current_slot);
                 }
             });
 
-            // Entry in vtable
             vtable_entries.push(quote! {
-                #method_name: #wrapper_name
+                #dummy_name: #dummy_wrapper
             });
 
-            // Keep original method
-            original_methods.push(method.clone());
+            current_slot += 1;
         }
+
+        let method_name = &method.name;
+        let wrapper_name = &method.wrapper_name;
+        let param_names = &method.param_names;
+        let param_types = &method.param_types;
+        let output = &method.output;
+
+        let this_cast = if method.is_mut {
+            quote! { &mut *(this as *mut #struct_type) }
+        } else {
+            quote! { &*(this as *const #struct_type) }
+        };
+
+        // Generate wrapper function
+        // x86: thiscall (this in ECX), x64: C calling convention
+        wrapper_fns.push(quote! {
+            #[allow(non_snake_case)]
+            #[cfg(target_arch = "x86")]
+            unsafe extern "thiscall" fn #wrapper_name(
+                this: *mut std::ffi::c_void
+                #(, #param_names: #param_types)*
+            ) #output {
+                unsafe {
+                    let obj = #this_cast;
+                    obj.#method_name(#(#param_names),*)
+                }
+            }
+
+            #[allow(non_snake_case)]
+            #[cfg(not(target_arch = "x86"))]
+            unsafe extern "C" fn #wrapper_name(
+                this: *mut std::ffi::c_void
+                #(, #param_names: #param_types)*
+            ) #output {
+                unsafe {
+                    let obj = #this_cast;
+                    obj.#method_name(#(#param_names),*)
+                }
+            }
+        });
+
+        // Entry in vtable
+        vtable_entries.push(quote! {
+            #method_name: #wrapper_name
+        });
+
+        // Keep original method (strip #[slot] attribute)
+        let mut cleaned_method = method.original.clone();
+        cleaned_method.attrs.retain(|a| !a.path().is_ident("slot"));
+        original_methods.push(cleaned_method);
+
+        current_slot += 1;
     }
 
     let vtable_static_name = format_ident!("__{}_VTABLE", struct_name.to_string().to_uppercase());

@@ -11,7 +11,7 @@
 
 // Use the cppvtable crate from crates/cppvtable
 // Declarative macros are #[macro_export] so they're at crate root
-use cppvtable::{define_interface, define_class};
+use cppvtable::{define_class, define_interface};
 
 use cpp::cpp;
 use std::ffi::c_void;
@@ -295,6 +295,50 @@ impl GearScore {
     }
 }
 
+// =============================================================================
+// TEST: #[slot(N)] attribute for explicit vtable slot indices
+// =============================================================================
+
+/// Interface with explicit slot indices - slots 0, 1, 5, 6
+#[cpp_interface]
+pub trait ISlotTest {
+    fn method_at_0(&self) -> i32; // slot 0
+    fn method_at_1(&self) -> i32; // slot 1
+    #[slot(5)]
+    fn method_at_5(&self) -> i32; // slot 5 (slots 2-4 are reserved)
+    fn method_at_6(&self) -> i32; // slot 6
+}
+
+#[repr(C)]
+pub struct SlotTester {
+    vtable: *const ISlotTestVTable,
+}
+
+#[implement(ISlotTest)]
+impl SlotTester {
+    fn method_at_0(&self) -> i32 {
+        0
+    }
+    fn method_at_1(&self) -> i32 {
+        1
+    }
+    #[slot(5)]
+    fn method_at_5(&self) -> i32 {
+        5
+    }
+    fn method_at_6(&self) -> i32 {
+        6
+    }
+}
+
+impl SlotTester {
+    pub fn new() -> Self {
+        SlotTester {
+            vtable: Self::vtable_ptr(),
+        }
+    }
+}
+
 fn main() {
     println!("=== C++ VTable Experiment ===\n");
 
@@ -385,6 +429,35 @@ fn main() {
     let cpu_score = score.get_score(0, 0, &mut conf);
     println!("  CPU Score: {} (confidence: {})", cpu_score, conf);
 
+    // Test #[slot(N)] attribute
+    println!("\n--- Slot index test (proc-macro) ---");
+    let slot_tester = SlotTester::new();
+    // Verify vtable has correct size: 7 slots (0,1,2,3,4,5,6) * 8 bytes = 56 bytes on x64
+    let vtable_size = std::mem::size_of::<ISlotTestVTable>();
+    let ptr_size = std::mem::size_of::<*const ()>();
+    let expected_slots = 7; // slots 0-6
+    let expected_size = expected_slots * ptr_size;
+    println!(
+        "  ISlotTestVTable size: {} bytes ({} slots)",
+        vtable_size,
+        vtable_size / ptr_size
+    );
+    assert_eq!(
+        vtable_size, expected_size,
+        "VTable should have 7 slots (0-6)"
+    );
+
+    // Call methods through the interface to verify they work
+    unsafe {
+        let iface = &*(&slot_tester as *const SlotTester as *const ISlotTest);
+        let iface = std::ptr::from_ref(iface).cast_mut().as_mut().unwrap();
+        assert_eq!(iface.method_at_0(), 0, "method_at_0 should return 0");
+        assert_eq!(iface.method_at_1(), 1, "method_at_1 should return 1");
+        assert_eq!(iface.method_at_5(), 5, "method_at_5 should return 5");
+        assert_eq!(iface.method_at_6(), 6, "method_at_6 should return 6");
+    }
+    println!("  All slot methods called correctly!");
+
     // Struct sizes
     println!("\n=== Struct sizes ===");
     println!("  Rust Dog: {} bytes", std::mem::size_of::<Dog>());
@@ -397,6 +470,11 @@ fn main() {
     println!(
         "  IRunnableVTable: {} bytes",
         std::mem::size_of::<IRunnableVTable>()
+    );
+    println!(
+        "  ISlotTestVTable: {} bytes ({} slots)",
+        vtable_size,
+        vtable_size / ptr_size
     );
 
     println!("\n=== ALL TESTS PASSED - VTABLE LAYOUTS MATCH! ===");

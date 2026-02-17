@@ -67,5 +67,4 @@ pub use paste::paste;
 #[doc(hidden)]
 pub use std::ffi::c_void;
 #[doc(hidden)]
-pub use std::sync::atomic::{compiler_fence, Ordering};
-
+pub use std::sync::atomic::{Ordering, compiler_fence};
