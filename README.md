@@ -3,6 +3,7 @@
 Rust library for C++ vtable interop with MSVC ABI compatibility.
 
 Define C++ compatible interfaces and classes in Rust that can:
+
 - Call methods on C++ objects passed to Rust
 - Be passed to C++ code which can call methods through the vtable
 
@@ -12,7 +13,12 @@ Define C++ compatible interfaces and classes in Rust that can:
 - **Calling conventions** - `thiscall` on x86, `C` on x64
 - **Explicit slot indices** - `[N] fn method()` syntax for specific vtable slots
 - **Multiple inheritance** - proper this-pointer adjustment
+- **Rust-side RTTI** - `TypeInfo` and `cast_to()` for runtime interface casting
 - **Two macro approaches** - declarative (`macro_rules!`) and proc-macro
+
+## Limitations
+
+- **No C++ RTTI support** - This crate does not interoperate with C++ native RTTI (`dynamic_cast`, `typeid`). C++ RTTI uses complex ABI-specific structures that vary between MSVC and GCC/Clang. If you need runtime casting of C++ objects, the C++ code should expose its own casting mechanism. The `rtti` module provides Rust-side type info for casting between interfaces on Rust objects only.
 
 ## Usage
 
@@ -86,47 +92,52 @@ unsafe {
 
 ## Feature Comparison
 
-| Feature | Declarative | Proc-macro |
-|---------|-------------|------------|
-| Slot indices `[N]` | ✅ | ❌ (planned) |
-| thiscall (x86) | ✅ | ❌ (planned) |
-| Clean Rust syntax | ❌ | ✅ |
-| No separate crate | ✅ | N/A |
+| Feature            | Declarative | Proc-macro   |
+| ------------------ | ----------- | ------------ |
+| Slot indices `[N]` | ✅          | ❌ (planned) |
+| thiscall (x86)     | ✅          | ❌ (planned) |
+| Clean Rust syntax  | ❌          | ✅           |
+| No separate crate  | ✅          | N/A          |
 
 ## Project Structure
 
 ```
 cppvtable/
-├── Cargo.toml           # Workspace + examples binary
-├── src/main.rs          # Examples and C++ interop tests
+├── Cargo.toml              # Workspace root
 └── crates/
-    ├── cppvtable/       # Library crate
+    ├── cppvtable/          # Main library (pure Rust)
     │   └── src/
-    │       ├── lib.rs   # Re-exports both approaches
-    │       └── decl.rs  # Declarative macros
-    └── cppvtable-macro/ # Proc-macro crate
+    │       ├── lib.rs      # Re-exports both approaches
+    │       ├── decl.rs     # Declarative macros
+    │       └── rtti.rs     # Rust-side RTTI for interface casting
+    ├── cppvtable-macro/    # Proc-macro crate
+    │   └── src/
+    │       └── lib.rs      # #[cpp_interface], #[implement]
+    └── cppvtable-cpp-tests/ # C++ interop tests (requires MSVC)
         └── src/
-            └── lib.rs   # #[cpp_interface], #[implement]
+            └── lib.rs      # Verifies vtable layout vs MSVC C++
 ```
 
 ## Testing
 
-The project includes C++ interop tests using the `cpp` crate to verify vtable layout compatibility with actual MSVC-compiled C++ code:
-
 ```bash
-cargo run
+# Run all Rust tests (no C++ compiler needed)
+cargo test -p cppvtable
+
+# Run C++ interop tests (requires MSVC)
+cargo test -p cppvtable-cpp-tests
 ```
 
-This compiles inline C++ classes and tests bidirectional vtable calls:
+The C++ interop tests verify vtable layout compatibility with actual MSVC-compiled C++ code:
+
 - Rust calling C++ objects via `from_ptr()`
 - C++ calling Rust objects through generated vtables
 
 ## Requirements
 
 - Rust 2024 edition
-- MSVC toolchain (for C++ interop tests)
+- MSVC toolchain (only for `cppvtable-cpp-tests`)
 
 ## License
 
 MIT
-

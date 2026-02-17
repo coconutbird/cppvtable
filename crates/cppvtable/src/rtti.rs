@@ -1,12 +1,31 @@
 //! Runtime Type Information (RTTI) for C++ vtable interop
 //!
-//! This module provides RTTI support matching the MSVC ABI layout.
-//! TypeInfo is stored at slot -1 (negative offset from vtable pointer).
+//! This module provides **Rust-side RTTI** for runtime interface casting.
+//! This is completely separate from C++ RTTI and does not interoperate with it.
+//!
+//! ## Important: No C++ RTTI Support
+//!
+//! This crate does **not** support C++ native RTTI (`dynamic_cast`, `typeid`).
+//! C++ RTTI uses complex ABI-specific structures (MSVC's `_RTTICompleteObjectLocator`,
+//! Itanium's `__class_type_info`) stored at vtable slot -1. Parsing these would require:
+//! - ABI-specific code for MSVC vs GCC/Clang
+//! - Walking complex class hierarchy descriptors
+//! - Handling virtual inheritance offsets
+//!
+//! If you need to cast C++ objects at runtime, the C++ code should expose its own
+//! casting mechanism (like COM's `QueryInterface`).
+//!
+//! ## What This Module Provides
+//!
+//! Rust-side type metadata for Rust objects implementing C++ interfaces:
+//! - [`TypeInfo`] - describes a Rust type and its implemented interfaces
+//! - [`InterfaceInfo`] - offset information for casting between interfaces
+//! - [`cast_to()`](TypeInfo::cast_to) - runtime casting between interfaces
 //!
 //! ## Memory Layout
 //!
 //! ```text
-//! VTable in memory:
+//! VTable in memory (with Rust RTTI):
 //! ┌─────────────────┐
 //! │ TypeInfo*       │  ← slot -1 (offset -8 on x64, -4 on x86)
 //! ├─────────────────┤
