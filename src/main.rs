@@ -248,62 +248,62 @@ impl Cat {
 }
 
 // =============================================================================
-// GearScore-like interface (matching FC2 pattern)
+// Cached metrics interface (lazy computation pattern)
 // =============================================================================
 
 #[cpp_interface]
-pub trait IGearScore {
+pub trait ICachedMetrics {
     fn destructor(&mut self, flags: u8) -> *mut c_void;
-    fn get_score(&mut self, score_type: i32, param: i32, confidence_out: *mut f32) -> f32;
-    fn compute_score(&mut self, score_type: i32, param: i32) -> i32;
+    fn get_metric(&mut self, metric_type: i32, param: i32, confidence_out: *mut f32) -> f32;
+    fn compute_metric(&mut self, metric_type: i32, param: i32) -> i32;
 }
 
-const SCORE_UNCOMPUTED: f32 = f32::MIN;
+const METRIC_NOT_COMPUTED: f32 = f32::MIN;
 
 #[repr(C)]
-pub struct GearScore {
-    vtable_i_gear_score: *const IGearScoreVTable,
-    pub scores: [f32; 2],
+pub struct CachedMetrics {
+    vtable_i_cached_metrics: *const ICachedMetricsVTable,
+    pub values: [f32; 2],
     pub confidence: [f32; 2],
 }
 
-#[implement(IGearScore)]
-impl GearScore {
+#[implement(ICachedMetrics)]
+impl CachedMetrics {
     fn destructor(&mut self, flags: u8) -> *mut c_void {
-        println!("GearScore destructor (flags: {})", flags);
-        self as *mut GearScore as *mut c_void
+        println!("CachedMetrics destructor (flags: {})", flags);
+        self as *mut CachedMetrics as *mut c_void
     }
 
-    fn get_score(&mut self, score_type: i32, param: i32, confidence_out: *mut f32) -> f32 {
-        if !(0..2).contains(&score_type) {
+    fn get_metric(&mut self, metric_type: i32, param: i32, confidence_out: *mut f32) -> f32 {
+        if !(0..2).contains(&metric_type) {
             return 0.0;
         }
-        let idx = score_type as usize;
-        if self.scores[idx] == SCORE_UNCOMPUTED {
-            self.compute_score(score_type, param);
+        let idx = metric_type as usize;
+        if self.values[idx] == METRIC_NOT_COMPUTED {
+            self.compute_metric(metric_type, param);
         }
         if !confidence_out.is_null() {
             unsafe { *confidence_out = self.confidence[idx] };
         }
-        self.scores[idx]
+        self.values[idx]
     }
 
-    fn compute_score(&mut self, score_type: i32, _param: i32) -> i32 {
-        if !(0..2).contains(&score_type) {
-            return score_type;
+    fn compute_metric(&mut self, metric_type: i32, _param: i32) -> i32 {
+        if !(0..2).contains(&metric_type) {
+            return metric_type;
         }
-        let idx = score_type as usize;
-        self.scores[idx] = 0.85;
+        let idx = metric_type as usize;
+        self.values[idx] = 0.85;
         self.confidence[idx] = 1.0;
-        score_type
+        metric_type
     }
 }
 
-impl GearScore {
+impl CachedMetrics {
     pub fn new() -> Self {
-        GearScore {
-            vtable_i_gear_score: Self::VTABLE_I_GEAR_SCORE,
-            scores: [SCORE_UNCOMPUTED; 2],
+        CachedMetrics {
+            vtable_i_cached_metrics: Self::VTABLE_I_CACHED_METRICS,
+            values: [METRIC_NOT_COMPUTED; 2],
             confidence: [1.0; 2],
         }
     }
@@ -519,12 +519,12 @@ fn main() {
         }
     }
 
-    // GearScore
-    println!("\n--- GearScore example ---");
-    let mut score = GearScore::new();
+    // Cached metrics (lazy computation pattern)
+    println!("\n--- Cached metrics example ---");
+    let mut metrics = CachedMetrics::new();
     let mut conf: f32 = 0.0;
-    let cpu_score = score.get_score(0, 0, &mut conf);
-    println!("  CPU Score: {} (confidence: {})", cpu_score, conf);
+    let value = metrics.get_metric(0, 0, &mut conf);
+    println!("  Metric 0: {} (confidence: {})", value, conf);
 
     // Test #[slot(N)] attribute
     println!("\n--- Slot index test (proc-macro) ---");
@@ -601,7 +601,10 @@ fn main() {
     println!("\n=== Struct sizes ===");
     println!("  Rust Dog: {} bytes", std::mem::size_of::<Dog>());
     println!("  Rust Cat: {} bytes", std::mem::size_of::<Cat>());
-    println!("  GearScore: {} bytes", std::mem::size_of::<GearScore>());
+    println!(
+        "  CachedMetrics: {} bytes",
+        std::mem::size_of::<CachedMetrics>()
+    );
     println!(
         "  IAnimalVTable: {} bytes",
         std::mem::size_of::<IAnimalVTable>()
