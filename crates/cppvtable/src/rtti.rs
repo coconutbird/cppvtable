@@ -22,7 +22,9 @@
 //! - [`InterfaceInfo`] - offset information for casting between interfaces
 //! - [`cast_to()`](TypeInfo::cast_to) - runtime casting between interfaces
 //!
-//! ## Memory Layout
+//! ## Optional Memory Layout
+//!
+//! [`VTableWithRtti`] can manually place Rust [`TypeInfo`] at slot -1:
 //!
 //! ```text
 //! VTable in memory (with Rust RTTI):
@@ -35,8 +37,9 @@
 //! └─────────────────┘
 //! ```
 //!
-//! The object's vtable pointer points to slot 0. To access TypeInfo,
-//! we read the pointer at offset -1.
+//! The object's vtable pointer points to slot 0. [`get_type_info`] reads the
+//! pointer at offset -1. Proc-macro-generated vtables do not use this wrapper
+//! automatically.
 
 use std::ffi::c_void;
 
@@ -137,7 +140,7 @@ pub trait HasTypeInfo {
 ///
 /// # Safety
 /// - `vtable_ptr` must point to a valid vtable with TypeInfo at slot -1
-/// - The vtable must have been generated with RTTI enabled
+/// - The vtable must be stored in [`VTableWithRtti`] or an equivalent layout
 #[inline]
 pub unsafe fn get_type_info(vtable_ptr: *const c_void) -> &'static TypeInfo {
     // SAFETY: Caller guarantees vtable has RTTI at slot -1

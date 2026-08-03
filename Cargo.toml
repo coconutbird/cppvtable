@@ -1,16 +1,23 @@
 [workspace]
-members = ["crates/*"]
+members = ["crates/*", "examples/*"]
 resolver = "2"
 
-[package]
-name = "cppvtable-examples"
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-description = "Examples and tests for cppvtable"
+license = "MIT"
+repository = "https://github.com/coconutbird/cppvtable"
 
-[dependencies]
-cppvtable = { path = "crates/cppvtable" }
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+
+[workspace.dependencies]
 cpp = "0.5"
-
-[build-dependencies]
 cpp_build = "0.5"
+cppvtable = { version = "0.1.0", path = "crates/cppvtable" }
+cppvtable-macro = { version = "0.1.0", path = "crates/cppvtable-macro" }
+paste = "1.0"
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "3", features = ["full", "extra-traits"] }
+windows-core = "0.62"

@@ -3,26 +3,29 @@
 //! Provides:
 //! - `#[cppvtable]` - Define a C++ interface (generates vtable struct)
 //! - `#[cppvtable_impl(Interface)]` - Implement an interface for a struct
-//! - `#[com_interface("guid")]` - Define a COM interface with IUnknown base
+//! - `#[com_interface("guid")]` - Define a COM interface with an `IUnknown` base
 //! - `#[com_implement(Interface)]` - Implement a COM interface for a struct
 //!
 //! ## Calling Conventions
 //!
 //! **C++ vtables (`cppvtable`):**
 //! - x86: `thiscall` (this in ECX)
-//! - x64: `C` (this as first param)
+//! - non-x86: `system` ABI (this as first parameter)
 //!
 //! **COM interfaces (`com_interface`):**
 //! - x86: `stdcall` (this on stack)
-//! - x64: `C` (this as first param)
+//! - non-x86: `system` ABI (this as first parameter)
 //!
 //! Supports explicit slot indices via `#[slot(N)]` attribute on methods.
 //!
 //! ## RTTI Support
 //!
-//! Both macros generate RTTI (Runtime Type Information) compatible with MSVC/Itanium ABI:
+//! The non-COM macros generate Rust-side RTTI metadata:
 //! - `#[cppvtable]` generates a unique interface ID
-//! - `#[cppvtable_impl]` generates TypeInfo with interface offsets for this-adjustment
+//! - `#[cppvtable_impl]` generates `InterfaceInfo` constants with offsets for this-adjustment
+//!
+//! This metadata is separate from native C++ RTTI and does not interoperate with
+//! `dynamic_cast` or `typeid`.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -78,17 +81,8 @@ fn qualify_type_for_macro(ty: &Type) -> TokenStream2 {
         }
         Type::Ptr(type_ptr) => {
             let inner = qualify_type_for_macro(&type_ptr.elem);
-            if type_ptr.const_token.is_some() {
-                if type_ptr.mutability.is_some() {
-                    quote! { *const mut #inner }
-                } else {
-                    quote! { *const #inner }
-                }
-            } else if type_ptr.mutability.is_some() {
-                quote! { *mut #inner }
-            } else {
-                quote! { *#inner }
-            }
+            let mutability = &type_ptr.mutability;
+            quote! { *#mutability #inner }
         }
         Type::Reference(type_ref) => {
             let inner = qualify_type_for_macro(&type_ref.elem);
@@ -325,7 +319,7 @@ fn validate_trait_method(method: &syn::TraitItemFn) -> Result<(), syn::Error> {
     // Check self is by reference, not by value
     for arg in &method.sig.inputs {
         if let FnArg::Receiver(receiver) = arg
-            && receiver.reference.is_none()
+            && !matches!(&receiver.kind, syn::ReceiverKind::Reference(..))
         {
             return Err(syn::Error::new(
                 receiver.self_token.span(),
@@ -408,7 +402,7 @@ fn validate_impl_method(method: &syn::ImplItemFn) -> Result<(), syn::Error> {
     // Check self is by reference, not by value
     for arg in &method.sig.inputs {
         if let FnArg::Receiver(receiver) = arg
-            && receiver.reference.is_none()
+            && !matches!(&receiver.kind, syn::ReceiverKind::Reference(..))
         {
             return Err(syn::Error::new(
                 receiver.self_token.span(),
@@ -573,6 +567,8 @@ fn cppvtable_internal(config: VTableConfig, input: ItemTrait) -> Result<TokenStr
     // the vtable function pointers will use `*mut T` instead of `*mut c_void`
     let generics = &input.generics;
     let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
+    let mut declaration_generics = generics.clone();
+    declaration_generics.where_clause = None;
     let has_type_params = generics.type_params().next().is_some();
 
     // Determine the self pointer type for vtable function pointers
@@ -856,7 +852,7 @@ fn cppvtable_internal(config: VTableConfig, input: ItemTrait) -> Result<TokenStr
         quote! {
             /// VTable struct for #trait_name
             #[repr(C)]
-            #vis struct #vtable_name #impl_generics #where_clause {
+            #vis struct #vtable_name #declaration_generics #where_clause {
                 #base_field,
                 #(#vtable_fields),*
             }
@@ -865,7 +861,7 @@ fn cppvtable_internal(config: VTableConfig, input: ItemTrait) -> Result<TokenStr
         quote! {
             /// VTable struct for #trait_name
             #[repr(C)]
-            #vis struct #vtable_name #impl_generics #where_clause {
+            #vis struct #vtable_name #declaration_generics #where_clause {
                 #(#vtable_fields),*
             }
         }
@@ -1112,7 +1108,7 @@ fn cppvtable_internal(config: VTableConfig, input: ItemTrait) -> Result<TokenStr
 
         /// Base struct representing the interface pointer
         #[repr(C)]
-        #vis struct #trait_name #impl_generics #where_clause {
+        #vis struct #trait_name #declaration_generics #where_clause {
             vtable: *const #vtable_name #type_generics,
             #phantom_field
         }
@@ -1481,11 +1477,16 @@ fn cppvtable_impl_internal(
                 .collect();
 
             // Check if method takes &self or &mut self
-            let is_mut = method
-                .sig
-                .inputs
-                .first()
-                .is_some_and(|arg| matches!(arg, FnArg::Receiver(r) if r.mutability.is_some()));
+            let is_mut = method.sig.inputs.first().is_some_and(|arg| {
+                matches!(
+                    arg,
+                    FnArg::Receiver(r)
+                        if matches!(
+                            &r.kind,
+                            syn::ReceiverKind::Reference(_, _, Some(_))
+                        )
+                )
+            });
 
             methods.push(ImplMethodInfo {
                 slot,
@@ -1590,7 +1591,7 @@ fn cppvtable_impl_internal(
         };
 
         // Generate wrapper function
-        // x86: thiscall/stdcall depending on config, x64: C calling convention
+        // x86: thiscall/stdcall depending on config; non-x86: system ABI
         wrapper_fns.push(quote! {
             #[allow(non_snake_case)]
             #[cfg(target_arch = "x86")]

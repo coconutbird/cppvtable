@@ -1,19 +1,22 @@
 //! C++ VTable interop for Rust (MSVC ABI)
 //!
-//! This crate provides C++ compatible vtable layouts with optional RTTI support.
+//! This crate provides C++ compatible vtable layouts and Rust-side interface metadata.
 //!
-//! ## RTTI (Runtime Type Information)
+//! ## Rust-side RTTI (Runtime Type Information)
 //!
-//! When enabled, vtables include type information at slot -1 (negative offset),
-//! matching the MSVC and Itanium ABIs. This enables:
+//! The proc-macros generate unique interface IDs and interface-offset metadata. This enables:
 //! - Runtime type identification
-//! - Safe cross-casting between interfaces (like `dynamic_cast`)
+//! - Pointer-adjusted casting between interfaces implemented by Rust objects
+//!
+//! This metadata is separate from native C++ RTTI and does not interoperate with
+//! `dynamic_cast` or `typeid`. The [`rtti::VTableWithRtti`] helper can manually place
+//! Rust [`rtti::TypeInfo`] at vtable slot -1 when that layout is desired.
 //!
 //! This crate provides two approaches for defining C++ compatible interfaces:
 //!
 //! ## Declarative macros (`decl` module)
-//! ```ignore
-//! use vtable::decl::*;
+//! ```no_run
+//! use cppvtable::{define_class, define_interface};
 //!
 //! define_interface! {
 //!     interface IAnimal {
@@ -30,8 +33,8 @@
 //! ```
 //!
 //! ## Proc-macros (`proc` module)
-//! ```ignore
-//! use cppvtable::proc::*;
+//! ```no_run
+//! use cppvtable::proc::{cppvtable, cppvtable_impl};
 //!
 //! #[cppvtable]
 //! pub trait IAnimal {
@@ -41,7 +44,7 @@
 //!
 //! #[repr(C)]
 //! pub struct Dog {
-//!     vtable: *const IAnimalVTable,
+//!     vtable_i_animal: *const IAnimalVTable,
 //!     name: [u8; 32],
 //! }
 //!

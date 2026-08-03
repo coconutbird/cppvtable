@@ -11,7 +11,7 @@ Define C++ compatible interfaces and classes in Rust that can:
 ## Features
 
 - **MSVC ABI compatible** - vtable layout matches MSVC C++ compiler
-- **Calling conventions** - `thiscall` on x86, `C` on x64
+- **Calling conventions** - `thiscall`/`stdcall` on x86 and the system ABI elsewhere
 - **Explicit slot indices** - `[N] fn method()` syntax for specific vtable slots
 - **Multiple inheritance** - proper this-pointer adjustment
 - **Rust-side RTTI** - `TypeInfo` and `cast_to()` for runtime interface casting
@@ -70,7 +70,7 @@ pub trait IAnimal {
 
 #[repr(C)]
 pub struct Dog {
-    vtable: *const IAnimalVTable,
+    vtable_i_animal: *const IAnimalVTable,
     pub name: [u8; 32],
 }
 
@@ -95,17 +95,15 @@ define_interface! {
         fn speak(&self);
         fn legs(&self) -> i32;
     }
-}
 
-define_interface! {
-    interface IAdvancedAnimal : IAnimal {
+    interface IAdvancedAnimal {
         fn run(&mut self);
         [5] fn special_method(&self);  // explicit slot index
     }
 }
 
 define_class! {
-    pub class Dog : IAnimal {
+    pub class Dog : IAnimal, IAdvancedAnimal {
         pub name: [u8; 32],
     }
 }
@@ -114,6 +112,8 @@ define_class! {
 ### Consuming C++ Objects
 
 ```rust
+use std::ffi::c_void;
+
 // Pointer from C++ code
 let cpp_animal: *mut c_void = get_cpp_animal();
 
@@ -127,34 +127,51 @@ unsafe {
 
 ## Feature Comparison
 
-| Feature           | Declarative        | Proc-macro      | COM               |
-| ----------------- | ------------------ | --------------- | ----------------- |
-| Slot indices      | ✅ `[N] fn method` | ✅ `#[slot(N)]` | ✅ (auto)         |
-| thiscall (x86)    | ✅                 | ✅              | ✅ (stdcall)      |
-| IUnknown support  | ❌                 | ❌              | ✅ (auto)         |
-| Interface IID     | ❌                 | ❌              | ✅ (GUID)         |
-| Clean Rust syntax | ❌                 | ✅              | ✅                |
+| Feature                | Declarative        | Proc-macro      | COM               |
+| ---------------------- | ------------------ | --------------- | ----------------- |
+| Slot indices           | ✅ `[N] fn method` | ✅ `#[slot(N)]` | ✅ `#[slot(N)]`   |
+| x86 calling convention | `thiscall`         | `thiscall`      | `stdcall`         |
+| `IUnknown` support     | ❌                 | ❌              | ✅ (auto)         |
+| Interface IID          | ❌                 | ❌              | ✅ (GUID)         |
+| Clean Rust syntax      | ❌                 | ✅              | ✅                |
 
 ## Project Structure
 
 ```
 cppvtable/
-├── Cargo.toml              # Workspace root
+├── Cargo.toml              # Virtual workspace configuration
+├── examples/
+│   └── cppvtable/          # Standalone C++/Rust example (requires MSVC)
+│       ├── Cargo.toml
+│       ├── build.rs
+│       └── src/
+│           └── main.rs
 └── crates/
     ├── cppvtable/          # Main library (pure Rust)
-    │   └── src/
-    │       ├── lib.rs      # Re-exports both approaches
-    │       ├── decl.rs     # Declarative macros
-    │       ├── com.rs      # COM types (GUID, HRESULT, IUnknown)
-    │       └── rtti.rs     # Rust-side RTTI for interface casting
+    │   ├── Cargo.toml
+    │   ├── src/
+    │   │   ├── lib.rs      # Re-exports both approaches
+    │   │   ├── decl.rs     # Declarative macros
+    │   │   ├── com.rs      # COM types (GUID, HRESULT, IUnknown)
+    │   │   └── rtti.rs     # Rust-side RTTI for interface casting
+    │   └── tests/          # Rust integration tests
     ├── cppvtable-macro/    # Proc-macro crate
+    │   ├── Cargo.toml
     │   └── src/
     │       └── lib.rs      # #[cppvtable], #[cppvtable_impl], #[com_interface], #[com_implement]
     └── cppvtable-cpp-tests/ # C++ interop tests (requires MSVC)
+        ├── Cargo.toml
+        ├── build.rs
         └── src/
             ├── lib.rs      # C++ classes, helpers, Rust interfaces
             ├── single.rs   # Single inheritance tests
             └── multi.rs    # Multiple inheritance tests
+```
+
+## Running the Example
+
+```bash
+cargo run -p cppvtable-example
 ```
 
 ## Testing
@@ -170,7 +187,7 @@ cargo test -p cppvtable-cpp-tests
 cargo test --workspace
 ```
 
-**Test coverage (87 tests):**
+**Test coverage includes:**
 
 - Single & multiple inheritance
 - This-pointer adjustment for secondary interfaces
@@ -182,7 +199,7 @@ cargo test --workspace
 ## Requirements
 
 - Rust 2024 edition
-- MSVC toolchain (only for `cppvtable-cpp-tests`)
+- MSVC toolchain (for `cppvtable-example` and `cppvtable-cpp-tests`)
 
 ## License
 
