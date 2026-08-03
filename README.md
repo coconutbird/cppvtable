@@ -11,7 +11,7 @@ Define C++ compatible interfaces and classes in Rust that can:
 ## Features
 
 - **MSVC ABI compatible** - vtable layout matches MSVC C++ compiler
-- **Calling conventions** - `thiscall` on x86, `C` on x64
+- **Calling conventions** - `thiscall`/`stdcall` on x86 and the system ABI elsewhere
 - **Explicit slot indices** - `[N] fn method()` syntax for specific vtable slots
 - **Multiple inheritance** - proper this-pointer adjustment
 - **Rust-side RTTI** - `TypeInfo` and `cast_to()` for runtime interface casting
@@ -70,7 +70,7 @@ pub trait IAnimal {
 
 #[repr(C)]
 pub struct Dog {
-    vtable: *const IAnimalVTable,
+    vtable_i_animal: *const IAnimalVTable,
     pub name: [u8; 32],
 }
 
@@ -95,17 +95,15 @@ define_interface! {
         fn speak(&self);
         fn legs(&self) -> i32;
     }
-}
 
-define_interface! {
-    interface IAdvancedAnimal : IAnimal {
+    interface IAdvancedAnimal {
         fn run(&mut self);
         [5] fn special_method(&self);  // explicit slot index
     }
 }
 
 define_class! {
-    pub class Dog : IAnimal {
+    pub class Dog : IAnimal, IAdvancedAnimal {
         pub name: [u8; 32],
     }
 }
@@ -114,6 +112,8 @@ define_class! {
 ### Consuming C++ Objects
 
 ```rust
+use std::ffi::c_void;
+
 // Pointer from C++ code
 let cpp_animal: *mut c_void = get_cpp_animal();
 
@@ -127,20 +127,19 @@ unsafe {
 
 ## Feature Comparison
 
-| Feature           | Declarative        | Proc-macro      | COM               |
-| ----------------- | ------------------ | --------------- | ----------------- |
-| Slot indices      | ✅ `[N] fn method` | ✅ `#[slot(N)]` | ✅ (auto)         |
-| thiscall (x86)    | ✅                 | ✅              | ✅ (stdcall)      |
-| IUnknown support  | ❌                 | ❌              | ✅ (auto)         |
-| Interface IID     | ❌                 | ❌              | ✅ (GUID)         |
-| Clean Rust syntax | ❌                 | ✅              | ✅                |
+| Feature                | Declarative        | Proc-macro      | COM               |
+| ---------------------- | ------------------ | --------------- | ----------------- |
+| Slot indices           | ✅ `[N] fn method` | ✅ `#[slot(N)]` | ✅ `#[slot(N)]`   |
+| x86 calling convention | `thiscall`         | `thiscall`      | `stdcall`         |
+| `IUnknown` support     | ❌                 | ❌              | ✅ (auto)         |
+| Interface IID          | ❌                 | ❌              | ✅ (GUID)         |
+| Clean Rust syntax      | ❌                 | ✅              | ✅                |
 
 ## Project Structure
 
 ```
 cppvtable/
 ├── Cargo.toml              # Virtual workspace configuration
-├── Cargo.lock
 ├── examples/
 │   └── cppvtable/          # Standalone C++/Rust example (requires MSVC)
 │       ├── Cargo.toml
@@ -188,7 +187,7 @@ cargo test -p cppvtable-cpp-tests
 cargo test --workspace
 ```
 
-**Test coverage (87 tests):**
+**Test coverage includes:**
 
 - Single & multiple inheritance
 - This-pointer adjustment for secondary interfaces

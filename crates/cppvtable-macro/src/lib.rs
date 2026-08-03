@@ -3,26 +3,29 @@
 //! Provides:
 //! - `#[cppvtable]` - Define a C++ interface (generates vtable struct)
 //! - `#[cppvtable_impl(Interface)]` - Implement an interface for a struct
-//! - `#[com_interface("guid")]` - Define a COM interface with IUnknown base
+//! - `#[com_interface("guid")]` - Define a COM interface with an `IUnknown` base
 //! - `#[com_implement(Interface)]` - Implement a COM interface for a struct
 //!
 //! ## Calling Conventions
 //!
 //! **C++ vtables (`cppvtable`):**
 //! - x86: `thiscall` (this in ECX)
-//! - x64: `C` (this as first param)
+//! - non-x86: `system` ABI (this as first parameter)
 //!
 //! **COM interfaces (`com_interface`):**
 //! - x86: `stdcall` (this on stack)
-//! - x64: `C` (this as first param)
+//! - non-x86: `system` ABI (this as first parameter)
 //!
 //! Supports explicit slot indices via `#[slot(N)]` attribute on methods.
 //!
 //! ## RTTI Support
 //!
-//! Both macros generate RTTI (Runtime Type Information) compatible with MSVC/Itanium ABI:
+//! The non-COM macros generate Rust-side RTTI metadata:
 //! - `#[cppvtable]` generates a unique interface ID
-//! - `#[cppvtable_impl]` generates TypeInfo with interface offsets for this-adjustment
+//! - `#[cppvtable_impl]` generates `InterfaceInfo` constants with offsets for this-adjustment
+//!
+//! This metadata is separate from native C++ RTTI and does not interoperate with
+//! `dynamic_cast` or `typeid`.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -1588,7 +1591,7 @@ fn cppvtable_impl_internal(
         };
 
         // Generate wrapper function
-        // x86: thiscall/stdcall depending on config, x64: C calling convention
+        // x86: thiscall/stdcall depending on config; non-x86: system ABI
         wrapper_fns.push(quote! {
             #[allow(non_snake_case)]
             #[cfg(target_arch = "x86")]
