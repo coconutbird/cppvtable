@@ -16,7 +16,7 @@ cpp = "0.5"
 cpp_build = "0.5"
 cppvtable = { version = "0.1.0", path = "crates/cppvtable" }
 cppvtable-macro = { version = "0.1.0", path = "crates/cppvtable-macro" }
-paste = "1.0"
+paste = { package = "pastey", version = "0.2.3" }
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "3", features = ["full", "extra-traits"] }

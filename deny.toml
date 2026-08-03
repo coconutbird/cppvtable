@@ -1,0 +1,46 @@
+[graph]
+all-features = true
+
+[advisories]
+yanked = "deny"
+unmaintained = "all"
+unsound = "all"
+ignore = []
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+]
+confidence-threshold = 0.93
+include-dev = true
+
+[bans]
+multiple-versions = "deny"
+multiple-versions-include-dev = true
+wildcards = "deny"
+highlight = "simplest-path"
+deny = [
+    {
+        crate = "paste",
+        reason = "paste is unmaintained (RUSTSEC-2024-0436)",
+        use-instead = "pastey",
+    },
+]
+skip = [
+    {
+        crate = "syn@2",
+        reason = "windows-core and rust-cpp still require Syn 2 while cppvtable-macro uses Syn 3",
+    },
+]
+
+[bans.workspace-dependencies]
+duplicates = "deny"
+include-path-dependencies = true
+unused = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
