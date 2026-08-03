@@ -270,8 +270,9 @@ pub const IID_IUNKNOWN: GUID = GUID::new(
 ///
 /// The generic parameter `T` represents the concrete type implementing the interface,
 /// allowing type-safe function pointers with `*mut T` instead of `*mut c_void`.
+/// It defaults to `c_void` for untyped and backwards-compatible use.
 #[crate::proc::cppvtable(stdcall, no_iid, internal)]
-pub trait IUnknown<T> {
+pub trait IUnknown<T = c_void> {
     /// Query for another interface by GUID.
     fn query_interface(&self, riid: *const GUID, ppv: *mut *mut c_void) -> HRESULT;
 

@@ -1,8 +1,8 @@
 [package]
-name = "cppvtable-cpp-tests"
+name = "cppvtable-example"
 version.workspace = true
 edition.workspace = true
-description = "C++ interop tests for cppvtable (requires MSVC)"
+description = "C++ interoperability example for cppvtable"
 license.workspace = true
 repository.workspace = true
 publish = false
@@ -16,4 +16,3 @@ cppvtable = { workspace = true }
 
 [build-dependencies]
 cpp_build = { workspace = true }
-

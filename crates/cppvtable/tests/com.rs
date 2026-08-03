@@ -278,24 +278,27 @@ fn test_generic_vtable_function_pointer_types() {
     }
 
     // Create a mock vtable with correctly typed function pointers
-    // These must be extern "C" and unsafe to match the vtable signature
-    unsafe extern "C" fn mock_open(_this: *mut PluginHandler, _stream: *mut c_void) -> HRESULT {
+    // These must use the system ABI and typed receiver to match the vtable signature
+    unsafe extern "system" fn mock_open(
+        _this: *mut PluginHandler,
+        _stream: *mut c_void,
+    ) -> HRESULT {
         S_OK
     }
-    unsafe extern "C" fn mock_close(_this: *mut PluginHandler) -> HRESULT {
+    unsafe extern "system" fn mock_close(_this: *mut PluginHandler) -> HRESULT {
         S_OK
     }
-    unsafe extern "C" fn mock_query_interface(
-        _this: *mut c_void,
+    unsafe extern "system" fn mock_query_interface(
+        _this: *mut PluginHandler,
         _riid: *const cppvtable::com::GUID,
         _ppv: *mut *mut c_void,
     ) -> HRESULT {
         S_OK
     }
-    unsafe extern "C" fn mock_add_ref(_this: *mut c_void) -> u32 {
+    unsafe extern "system" fn mock_add_ref(_this: *mut PluginHandler) -> u32 {
         1
     }
-    unsafe extern "C" fn mock_release(_this: *mut c_void) -> u32 {
+    unsafe extern "system" fn mock_release(_this: *mut PluginHandler) -> u32 {
         0
     }
 

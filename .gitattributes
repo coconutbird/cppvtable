@@ -1,0 +1,16 @@
+# Normalize text files and keep repository checkouts consistent across platforms.
+* text=auto eol=lf
+
+# Never apply text normalization or textual diffs to binary assets.
+*.7z binary
+*.dll binary
+*.exe binary
+*.gif binary
+*.gz binary
+*.ico binary
+*.jpeg binary
+*.jpg binary
+*.pdf binary
+*.png binary
+*.tar binary
+*.zip binary

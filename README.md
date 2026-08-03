@@ -139,22 +139,40 @@ unsafe {
 
 ```
 cppvtable/
-├── Cargo.toml              # Workspace root
+├── Cargo.toml              # Virtual workspace configuration
+├── Cargo.lock
+├── examples/
+│   └── cppvtable/          # Standalone C++/Rust example (requires MSVC)
+│       ├── Cargo.toml
+│       ├── build.rs
+│       └── src/
+│           └── main.rs
 └── crates/
     ├── cppvtable/          # Main library (pure Rust)
-    │   └── src/
-    │       ├── lib.rs      # Re-exports both approaches
-    │       ├── decl.rs     # Declarative macros
-    │       ├── com.rs      # COM types (GUID, HRESULT, IUnknown)
-    │       └── rtti.rs     # Rust-side RTTI for interface casting
+    │   ├── Cargo.toml
+    │   ├── src/
+    │   │   ├── lib.rs      # Re-exports both approaches
+    │   │   ├── decl.rs     # Declarative macros
+    │   │   ├── com.rs      # COM types (GUID, HRESULT, IUnknown)
+    │   │   └── rtti.rs     # Rust-side RTTI for interface casting
+    │   └── tests/          # Rust integration tests
     ├── cppvtable-macro/    # Proc-macro crate
+    │   ├── Cargo.toml
     │   └── src/
     │       └── lib.rs      # #[cppvtable], #[cppvtable_impl], #[com_interface], #[com_implement]
     └── cppvtable-cpp-tests/ # C++ interop tests (requires MSVC)
+        ├── Cargo.toml
+        ├── build.rs
         └── src/
             ├── lib.rs      # C++ classes, helpers, Rust interfaces
             ├── single.rs   # Single inheritance tests
             └── multi.rs    # Multiple inheritance tests
+```
+
+## Running the Example
+
+```bash
+cargo run -p cppvtable-example
 ```
 
 ## Testing
@@ -182,7 +200,7 @@ cargo test --workspace
 ## Requirements
 
 - Rust 2024 edition
-- MSVC toolchain (only for `cppvtable-cpp-tests`)
+- MSVC toolchain (for `cppvtable-example` and `cppvtable-cpp-tests`)
 
 ## License
 
