@@ -139,7 +139,11 @@ unsafe {
 
 ```
 cppvtable/
+├── .github/
+│   └── workflows/
+│       └── dependencies.yml # Dependency-policy CI
 ├── Cargo.toml              # Virtual workspace configuration
+├── deny.toml               # Advisories, licenses, bans, and source policy
 ├── examples/
 │   └── cppvtable/          # Standalone C++/Rust example (requires MSVC)
 │       ├── Cargo.toml
@@ -185,6 +189,9 @@ cargo test -p cppvtable-cpp-tests
 
 # Run all tests
 cargo test --workspace
+
+# Audit the complete dependency graph
+cargo deny check
 ```
 
 **Test coverage includes:**
