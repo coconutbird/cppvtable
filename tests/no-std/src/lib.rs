@@ -84,27 +84,28 @@ pub fn with_native_rtti(
     cppvtable::rtti::RttiObject::new(CppValue { value }, class)
 }
 
-/// Hook one object's C++ interface through a copy of its table.
+/// Replace slot zero of one object's C++ interface table.
 ///
-/// Returns the copy, which must stay alive until the original table is restored.
+/// Returns the hook; dropping it restores the original table.
 ///
 /// # Safety
 ///
-/// `object` must be a live native interface with `entries` pointer entries and an
-/// RTTI prefix of `prefix_size` bytes; `hook` must match slot zero's signature.
+/// `object` must satisfy [`cppvtable::hook::VtableHook::new`] for `entries` pointer
+/// entries, an RTTI prefix of `prefix_size` bytes, and `mode`; `hook` must match slot
+/// zero's signature and calling convention.
+#[must_use = "dropping the hook restores the original table"]
 pub unsafe fn hook_first_entry(
     object: *mut core::ffi::c_void,
     prefix_size: usize,
     entries: usize,
+    mode: cppvtable::hook::HookMode,
     hook: *const core::ffi::c_void,
-) -> (cppvtable::hook::ShadowVtable, *const core::ffi::c_void) {
+) -> cppvtable::hook::VtableHook {
     // SAFETY: The caller guarantees the table shape, signature, and exclusive access.
     unsafe {
-        let table = object.cast::<*const core::ffi::c_void>().read();
-        let mut shadow = cppvtable::hook::ShadowVtable::copy_native(table, prefix_size, entries);
-        let _ = shadow.replace(0, hook);
-        let previous = cppvtable::hook::swap_vtable(object, shadow.address_point());
-        (shadow, previous)
+        let mut vtable_hook = cppvtable::hook::VtableHook::new(object, prefix_size, entries, mode);
+        let _ = vtable_hook.replace(0, hook);
+        vtable_hook
     }
 }
 

@@ -278,8 +278,8 @@ COM reference-count policies also require target support for 32-bit atomics.
 Procedural macros execute on the build host and do not add a target `std` dependency.
 
 The maintained consumer in `tests/no-std` compiles and exercises generated pointer,
-inline, and COM interfaces, and type-checks the RTTI and hooking APIs. Its CI checks
-all features on `thumbv7em-none-eabi`:
+inline, and COM interfaces, and type-checks the RTTI classes and `VtableHook`. Its
+CI checks all features on `thumbv7em-none-eabi`:
 
 ```sh
 cargo check -p cppvtable-abi -p cppvtable -p cppvtable-com --all-features --target thumbv7em-none-eabi
@@ -365,21 +365,36 @@ explicit metadata and function-entry decoding without assuming pointer-sized slo
 
 ## Vtable hooking
 
-`cppvtable::hook` hooks native C++ objects without touching their shared tables.
-`ShadowVtable::copy_native(address_point, prefix_size, entries)` copies a
-pointer-entry vtable together with the bytes before its address point, so `typeid`
-and `dynamic_cast` keep working. `ShadowVtable::replace` swaps entries and returns
-the originals for forwarding, and `swap_vtable` points one object at the copy and
-returns its previous table for restoration. Other objects of the class are
-unaffected. Pass `RttiMetadata::prefix_size()` as the prefix size, plus any Itanium
-virtual-base offset entries that precede it.
+`cppvtable::hook::VtableHook` installs Rust implementations of virtual methods on
+native C++ objects. `VtableHook::new(object, prefix_size, entries, mode)` copies the
+object's pointer-entry vtable, together with the bytes before its address point,
+into a heap backup. Pass `RttiMetadata::prefix_size()` as the prefix size, plus any
+Itanium virtual-base offset entries that precede it. `HookMode` chooses where
+replacements go:
 
-`patch_vtable_entry` instead overwrites an entry of a shared table in place,
-affecting every object that uses it. It is not guaranteed to work: compiler vtables
-normally live in read-only memory, native callers may devirtualize the call, and
-making memory writable is the caller's job. Nothing tracks which objects point at a
-copy; restore their tables before dropping it. See the
-[hooking fixture](crates/cppvtable-cpp-tests/src/rtti/hook.rs).
+- `Shadow` points this object at the copy, so other objects of the class are
+  unaffected and `typeid` and `dynamic_cast` keep working through the copied prefix.
+- `Patch` overwrites the shared table in place, affecting every object that uses it,
+  and keeps the copy as a backup. It is not guaranteed to work: compiler vtables
+  normally live in read-only memory, making it writable is the caller's job, and
+  native callers may devirtualize the call.
+
+`replace(slot, entry)` installs an entry and returns the previous one,
+`original(slot)` returns the unhooked entry for forwarding, and `restore(slot)`
+puts it back. Dropping the hook restores the object's table pointer
+(`Shadow`) or every changed entry (`Patch`). Hooks on the same object or table copy
+each other's tables, so drop them in reverse installation order:
+
+```rust,ignore
+// SAFETY: `object` is a live native interface whose first two entries match, and
+// nothing else touches it until `hook` drops.
+let mut hook = unsafe { VtableHook::new(object, metadata.prefix_size(), 2, HookMode::Shadow) };
+ORIGINAL.store(hook.original(0).cast_mut(), Ordering::Relaxed);
+// SAFETY: `forwarding_hook` has slot 0's signature and calls `ORIGINAL`.
+let _ = unsafe { hook.replace(0, forwarding_hook as *const c_void) };
+```
+
+See the [hooking fixture](crates/cppvtable-cpp-tests/src/rtti/hook.rs).
 
 ## Compiler support and scope
 

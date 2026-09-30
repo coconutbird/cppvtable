@@ -1,10 +1,17 @@
-//! Heap-allocated vtable copies for RTTI classes and virtual-method hooking.
+//! Installing Rust implementations of virtual methods on native C++ objects.
 //!
-//! Portable hooking is per object: copy the native table into a [`ShadowVtable`],
-//! replace selected entries, and point one object at the copy with [`swap_vtable`].
-//! Other objects of the class are unaffected, and type identity and casts keep
-//! working because the native prefix is copied unchanged. [`patch_vtable_entry`]
-//! offers unguaranteed global patching of a shared table instead.
+//! A [`VtableHook`] copies an object's current table, including the RTTI prefix
+//! before its address point, and replaces selected entries until it is dropped.
+//! [`HookMode`] chooses where replacements go:
+//!
+//! - [`HookMode::Shadow`] points one object at the copy. Other objects of the class
+//!   are unaffected, and `typeid` and `dynamic_cast` keep working because the native
+//!   prefix is copied unchanged.
+//! - [`HookMode::Patch`] overwrites the shared table in place and keeps the copy as a
+//!   backup. It affects every object using the table and is not guaranteed to work.
+//!
+//! [`VtableHook::original`] returns the entry a hook forwards to. Dropping the hook
+//! restores the object's table pointer (shadow) or the patched entries (patch).
 //!
 //! Only tables with pointer-sized entries are supported; Clang relative vtables use
 //! displacements that are invalid once copied elsewhere.
@@ -19,9 +26,8 @@ const ENTRY: usize = size_of::<*const c_void>();
 
 /// A heap copy of a vtable prefix and its function entries.
 ///
-/// The copy owns its storage. Objects pointing at it are not tracked: callers of
-/// [`swap_vtable`] must restore the original table before dropping the copy.
-pub struct ShadowVtable {
+/// The copy owns its storage; objects pointing at it are not tracked.
+pub(crate) struct ShadowVtable {
     allocation: NonNull<u8>,
     layout: Layout,
     prefix_size: usize,
@@ -52,27 +58,16 @@ impl ShadowVtable {
         })
     }
 
-    /// Copy a native pointer-entry vtable.
-    ///
-    /// Copies `prefix_size` bytes before `address_point` and `entries` function
-    /// entries from it. The RTTI prefix size is
-    /// [`crate::rtti::RttiMetadata::prefix_size`]; tables of classes with Itanium
-    /// virtual bases need the additional offset entries preceding it.
+    /// Copy `prefix_size` bytes before `address_point` and `entries` entries from it.
     ///
     /// # Safety
     ///
-    /// Every copied byte must be readable. Entries must be pointer-sized function
-    /// addresses rather than relative displacements or authenticated pointers.
+    /// Every copied byte must be readable.
     ///
     /// # Panics
     ///
     /// Panics if `entries` is zero or `prefix_size` is not a multiple of the pointer size.
-    #[must_use]
-    pub unsafe fn copy_native(
-        address_point: *const c_void,
-        prefix_size: usize,
-        entries: usize,
-    ) -> Self {
+    unsafe fn copy(address_point: *const c_void, prefix_size: usize, entries: usize) -> Self {
         let table = Self::allocate(prefix_size, entries)
             .expect("a vtable copy needs entries and a pointer-aligned prefix");
         // SAFETY: The caller makes the source readable; the new allocation is disjoint
@@ -93,48 +88,8 @@ impl ShadowVtable {
     }
 
     /// The function address point to store in an object's vtable pointer.
-    #[must_use]
-    pub fn address_point(&self) -> *const c_void {
+    pub(crate) fn address_point(&self) -> *const c_void {
         self.entries_ptr().cast_const().cast()
-    }
-
-    /// Number of function entries.
-    #[must_use]
-    pub fn entry_count(&self) -> usize {
-        self.entries
-    }
-
-    /// Read a function entry.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `slot` is out of range.
-    #[must_use]
-    pub fn entry(&self, slot: usize) -> *const c_void {
-        assert!(slot < self.entries, "vtable slot out of range");
-        // SAFETY: The slot is inside the initialized, pointer-aligned entries.
-        unsafe { self.entries_ptr().add(slot).read() }
-    }
-
-    /// Replace a function entry and return the previous one.
-    ///
-    /// The previous entry is typically the original method a hook forwards to.
-    /// Calling through the table remains unsafe; the caller of [`swap_vtable`] vouches
-    /// for matching signatures.
-    ///
-    /// # Safety
-    ///
-    /// No thread may call through or read this entry concurrently, including native
-    /// callers of objects the table is installed on.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `slot` is out of range.
-    pub unsafe fn replace(&mut self, slot: usize, entry: *const c_void) -> *const c_void {
-        assert!(slot < self.entries, "vtable slot out of range");
-        // SAFETY: The slot is inside the pointer-aligned entries, and the caller
-        // excludes concurrent readers.
-        unsafe { self.entries_ptr().add(slot).replace(entry) }
     }
 
     fn entries_ptr(&self) -> *mut *const c_void {
@@ -150,47 +105,194 @@ impl Drop for ShadowVtable {
     }
 }
 
-/// Store a new vtable address point in an object and return the previous one.
-///
-/// Restore the returned address point with another call before the replacement
-/// table is dropped or modified.
-///
-/// # Safety
-///
-/// `object` must be a live polymorphic interface whose vtable pointer is its first
-/// field, with no concurrent access to that field. `address_point` must remain valid
-/// while installed and provide every entry and prefix field that any caller of the
-/// object may use, with matching signatures and calling conventions.
-#[must_use = "restore the previous address point before dropping the replacement"]
-pub unsafe fn swap_vtable(object: *mut c_void, address_point: *const c_void) -> *const c_void {
-    // SAFETY: The caller guarantees exclusive access to the object's vtable pointer.
-    unsafe { object.cast::<*const c_void>().replace(address_point) }
+/// Where a [`VtableHook`] installs replacement entries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HookMode {
+    /// Portable: repoint only this object at the shadow copy; other objects of the
+    /// class are unaffected.
+    Shadow,
+    /// Overwrite entries of the shared native table in place; affects every object
+    /// using it.
+    ///
+    /// Not guaranteed: compiler vtables normally live in read-only memory (making it
+    /// writable is the caller's job) and devirtualized calls are not affected.
+    Patch,
 }
 
-/// Overwrite one entry of a shared vtable in place and return the previous entry.
+/// Replaced virtual methods of one native object, restored on drop.
 ///
-/// This affects every object using the table. It is not guaranteed to work:
-/// compiler-produced vtables normally live in read-only memory, and native callers may
-/// have devirtualized or inlined the method. Making the memory writable, and
-/// synchronizing with other threads calling through the table, is the caller's job.
+/// Construction copies the object's current table into a heap shadow. In
+/// [`HookMode::Shadow`] the object's vtable pointer is repointed at the shadow, and
+/// replacements go into the shadow. In [`HookMode::Patch`] the shadow is never
+/// installed: it is the untouched backup of the native table, and replacements go into
+/// the native table.
 ///
-/// # Safety
-///
-/// `address_point` must be a pointer-entry vtable with at least `slot + 1` entries,
-/// writable for the duration of the call, with no concurrent access to that entry.
-/// `entry` must have the replaced method's signature and calling convention.
-#[must_use = "the previous entry is needed to forward to or restore the original"]
-pub unsafe fn patch_vtable_entry(
-    address_point: *const c_void,
-    slot: usize,
-    entry: *const c_void,
-) -> *const c_void {
-    // SAFETY: The caller guarantees a writable, exclusively accessed entry.
-    unsafe {
-        address_point
-            .cast_mut()
-            .cast::<*const c_void>()
-            .add(slot)
-            .replace(entry)
+/// Hooks on the same object or table copy each other's tables, so they must be
+/// dropped in reverse installation order.
+pub struct VtableHook {
+    object: *mut c_void,
+    native: *const c_void,
+    mode: HookMode,
+    shadow: ShadowVtable,
+}
+
+impl VtableHook {
+    /// Hook `object` by copying its current table.
+    ///
+    /// Copies `prefix_size` bytes before the address point and `entries` pointer
+    /// entries. The RTTI prefix size is [`crate::rtti::RttiMetadata::prefix_size`];
+    /// tables of classes with Itanium virtual bases need the additional offset entries
+    /// preceding it.
+    ///
+    /// # Safety
+    ///
+    /// - `object` must be a live polymorphic interface whose vtable pointer is its first
+    ///   field. It must stay live, with no concurrent access to that field, until the
+    ///   hook is dropped.
+    /// - Every copied byte of its table must be readable, and the table must stay valid
+    ///   until the hook is dropped. Entries must be pointer-sized function addresses,
+    ///   not Clang relative displacements or authenticated pointers.
+    /// - In [`HookMode::Patch`] the native entries must be writable, with no concurrent
+    ///   callers, for every [`Self::replace`] and [`Self::restore`] and for the drop.
+    /// - Hooks on the same object or table must be dropped in reverse installation order.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `entries` is zero or `prefix_size` is not a multiple of the pointer size.
+    #[must_use = "dropping the hook restores the original table"]
+    pub unsafe fn new(
+        object: *mut c_void,
+        prefix_size: usize,
+        entries: usize,
+        mode: HookMode,
+    ) -> Self {
+        let vptr = object.cast::<*const c_void>();
+        // SAFETY: The caller guarantees a live object with its vtable pointer first.
+        let native = unsafe { vptr.read() };
+        // SAFETY: The caller makes the prefix and entries readable.
+        let shadow = unsafe { ShadowVtable::copy(native, prefix_size, entries) };
+        if mode == HookMode::Shadow {
+            // SAFETY: The caller excludes concurrent access to the vtable pointer; the
+            // shadow outlives the installation because drop restores `native` first.
+            unsafe { vptr.write(shadow.address_point()) };
+        }
+        Self {
+            object,
+            native,
+            mode,
+            shadow,
+        }
+    }
+
+    /// Where replacement entries are installed.
+    #[must_use]
+    pub fn mode(&self) -> HookMode {
+        self.mode
+    }
+
+    /// The table address point the object calls through while hooked: the shadow in
+    /// [`HookMode::Shadow`], the native table in [`HookMode::Patch`].
+    #[must_use]
+    pub fn address_point(&self) -> *const c_void {
+        match self.mode {
+            HookMode::Shadow => self.shadow.address_point(),
+            HookMode::Patch => self.native,
+        }
+    }
+
+    /// Number of hookable entries.
+    #[must_use]
+    pub fn entry_count(&self) -> usize {
+        self.shadow.entries
+    }
+
+    /// The original entry at `slot`, which hooks forward to.
+    ///
+    /// Read from the native table, which shadow mode never writes, in
+    /// [`HookMode::Shadow`], and from the backup captured at construction in
+    /// [`HookMode::Patch`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `slot` is out of range.
+    #[must_use]
+    pub fn original(&self, slot: usize) -> *const c_void {
+        self.check(slot);
+        let table = match self.mode {
+            HookMode::Shadow => self.native.cast::<*const c_void>(),
+            HookMode::Patch => self.shadow.entries_ptr().cast_const(),
+        };
+        // SAFETY: The slot is in range of a readable table: the native table stays
+        // valid while hooked, and the backup is owned.
+        unsafe { table.add(slot).read() }
+    }
+
+    /// Install `entry` at `slot` of the active table and return the previous entry.
+    ///
+    /// # Safety
+    ///
+    /// `entry` must have the replaced method's signature and calling convention. No
+    /// thread may call through or read this entry concurrently. In
+    /// [`HookMode::Patch`] the native entry must be writable.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `slot` is out of range.
+    pub unsafe fn replace(&mut self, slot: usize, entry: *const c_void) -> *const c_void {
+        self.check(slot);
+        // SAFETY: The slot is in range; the caller makes it writable and exclusive.
+        unsafe { self.active().add(slot).replace(entry) }
+    }
+
+    /// Put the original entry back at `slot` of the active table.
+    ///
+    /// # Safety
+    ///
+    /// No thread may call through or read this entry concurrently. In
+    /// [`HookMode::Patch`] the native entry must be writable.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `slot` is out of range.
+    pub unsafe fn restore(&mut self, slot: usize) {
+        let original = self.original(slot);
+        // SAFETY: `original` checked the slot; the caller makes it writable and exclusive.
+        unsafe { self.active().add(slot).write(original) };
+    }
+
+    fn check(&self, slot: usize) {
+        assert!(slot < self.shadow.entries, "vtable slot out of range");
+    }
+
+    fn active(&self) -> *mut *const c_void {
+        match self.mode {
+            HookMode::Shadow => self.shadow.entries_ptr(),
+            HookMode::Patch => self.native.cast_mut().cast(),
+        }
+    }
+}
+
+impl Drop for VtableHook {
+    fn drop(&mut self) {
+        match self.mode {
+            // SAFETY: `new`'s contract keeps the object live with an exclusive vptr.
+            HookMode::Shadow => unsafe { self.object.cast::<*const c_void>().write(self.native) },
+            HookMode::Patch => {
+                let backup = self.shadow.entries_ptr();
+                let native = self.active();
+                for slot in 0..self.shadow.entries {
+                    // SAFETY: Both tables hold `entries` entries; `new`'s contract makes
+                    // the native entries writable and exclusive during drop. Only
+                    // changed slots are written to avoid needless writes to shared memory.
+                    unsafe {
+                        let original = backup.add(slot).read();
+                        let live = native.add(slot);
+                        if live.read() != original {
+                            live.write(original);
+                        }
+                    }
+                }
+            }
+        }
     }
 }

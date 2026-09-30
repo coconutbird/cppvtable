@@ -1,75 +1,111 @@
-//! Vtable copies used for per-object hooking.
+//! Vtable hooks in both modes over fake pointer-entry tables.
 
 use core::ffi::c_void;
 
-use cppvtable::hook::{ShadowVtable, swap_vtable};
+use cppvtable::hook::{HookMode, VtableHook};
 
 /// Two prefix words followed by three entries; the address point is index 2.
 fn native_table() -> [usize; 5] {
     [0x10, 0x20, 0x100, 0x200, 0x300]
 }
 
-fn address_point(table: &[usize; 5]) -> *const c_void {
-    core::ptr::from_ref(&table[2]).cast()
+const PREFIX: usize = 2 * size_of::<usize>();
+
+fn address_point(table: &mut [usize; 5]) -> *const c_void {
+    table.as_mut_ptr().wrapping_add(2).cast_const().cast()
 }
 
-#[test]
-fn a_copy_keeps_the_prefix_and_entries_and_replaces_without_touching_the_source() {
-    let source = native_table();
-    let prefix = 2 * size_of::<usize>();
-    // SAFETY: The prefix and three entries are readable.
-    let mut shadow = unsafe { ShadowVtable::copy_native(address_point(&source), prefix, 3) };
-    assert_eq!(shadow.entry_count(), 3);
-    let copied = shadow.address_point().cast::<usize>();
-    // SAFETY: The copy holds the two prefix words before its address point.
-    assert_eq!(
-        unsafe { [copied.sub(2).read(), copied.sub(1).read()] },
-        [0x10, 0x20]
-    );
-    assert_eq!(shadow.entry(2), 0x300 as *const c_void);
-
-    // SAFETY: No object uses the copy yet.
-    let previous = unsafe { shadow.replace(1, 0x999 as *const c_void) };
-    assert_eq!(previous, 0x200 as *const c_void);
-    assert_eq!(shadow.entry(1), 0x999 as *const c_void);
-    assert_eq!(source, native_table());
+fn entry(value: usize) -> *const c_void {
+    value as *const c_void
 }
 
-#[test]
-fn swapping_returns_the_previous_address_point_for_restoration() {
-    let source = native_table();
-    // SAFETY: The prefix and entries are readable.
-    let shadow = unsafe { ShadowVtable::copy_native(address_point(&source), 0, 3) };
-    let mut object = address_point(&source);
-    let raw = core::ptr::from_mut(&mut object).cast::<c_void>();
-    // SAFETY: `object` stands in for a live object whose first field is its vptr.
+/// A stand-in object whose only field is its vtable pointer.
+fn as_object(vptr: &mut *const c_void) -> *mut c_void {
+    core::ptr::from_mut(vptr).cast()
+}
+
+/// # Safety
+/// `address_point` must be preceded by two words and followed by three entries.
+unsafe fn read_table(address_point: *const c_void) -> [usize; 5] {
+    // SAFETY: Guaranteed by the caller.
     unsafe {
-        assert_eq!(
-            swap_vtable(raw, shadow.address_point()),
-            address_point(&source)
-        );
-        assert_eq!(object, shadow.address_point());
-        assert_eq!(
-            swap_vtable(raw, address_point(&source)),
-            shadow.address_point()
-        );
+        address_point
+            .cast::<usize>()
+            .sub(2)
+            .cast::<[usize; 5]>()
+            .read()
     }
-    assert_eq!(object, address_point(&source));
+}
+
+#[test]
+fn shadow_mode_repoints_only_the_object_and_restores_it_on_drop() {
+    let mut table = native_table();
+    let native = address_point(&mut table);
+    let mut object = native;
+    // SAFETY: `object` stands in for a live object; the table is readable and outlives
+    // the hook, which is its only user.
+    unsafe {
+        let mut hook = VtableHook::new(as_object(&mut object), PREFIX, 3, HookMode::Shadow);
+        assert_eq!(hook.mode(), HookMode::Shadow);
+        assert_eq!(hook.entry_count(), 3);
+        assert_eq!(object, hook.address_point());
+        assert_ne!(object, native);
+        assert_eq!(read_table(hook.address_point()), native_table());
+
+        assert_eq!(hook.replace(1, entry(0x999)), entry(0x200));
+        assert_eq!(
+            read_table(hook.address_point()),
+            [0x10, 0x20, 0x100, 0x999, 0x300]
+        );
+        assert_eq!(hook.original(1), entry(0x200));
+        assert_eq!(read_table(native), native_table());
+
+        drop(hook);
+    }
+    assert_eq!(object, native);
+}
+
+#[test]
+fn patch_mode_writes_the_native_table_and_restores_it_from_the_backup() {
+    let mut table = native_table();
+    let native = address_point(&mut table);
+    let mut object = native;
+    // SAFETY: The table is writable and only accessed through `native` until the hook
+    // drops; nothing calls through it.
+    unsafe {
+        let mut hook = VtableHook::new(as_object(&mut object), PREFIX, 3, HookMode::Patch);
+        assert_eq!(hook.address_point(), native);
+        assert_eq!(object, native);
+
+        assert_eq!(hook.replace(0, entry(0x777)), entry(0x100));
+        assert_eq!(hook.replace(2, entry(0x999)), entry(0x300));
+        assert_eq!(read_table(native), [0x10, 0x20, 0x777, 0x200, 0x999]);
+        assert_eq!(hook.original(2), entry(0x300));
+
+        hook.restore(0);
+        assert_eq!(read_table(native), [0x10, 0x20, 0x100, 0x200, 0x999]);
+
+        drop(hook);
+    }
+    assert_eq!(object, native);
+    assert_eq!(table, native_table());
 }
 
 #[test]
 #[should_panic(expected = "vtable slot out of range")]
-fn entries_past_the_copied_count_are_rejected() {
-    let source = native_table();
-    // SAFETY: The entries are readable.
-    let shadow = unsafe { ShadowVtable::copy_native(address_point(&source), 0, 3) };
-    let _ = shadow.entry(3);
+fn slots_past_the_copied_count_are_rejected() {
+    let mut table = native_table();
+    let mut object = address_point(&mut table);
+    // SAFETY: The table is readable and outlives the hook.
+    let hook = unsafe { VtableHook::new(as_object(&mut object), 0, 3, HookMode::Shadow) };
+    let _ = hook.original(3);
 }
 
 #[test]
 #[should_panic(expected = "pointer-aligned prefix")]
 fn a_partial_prefix_word_is_rejected() {
-    let source = native_table();
-    // SAFETY: Rejected before reading.
-    let _ = unsafe { ShadowVtable::copy_native(address_point(&source), 3, 3) };
+    let mut table = native_table();
+    let mut object = address_point(&mut table);
+    // SAFETY: Rejected before the object is modified.
+    let _ = unsafe { VtableHook::new(as_object(&mut object), 3, 3, HookMode::Shadow) };
 }

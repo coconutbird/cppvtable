@@ -1,7 +1,10 @@
-//! Per-object vtable hooking of native C++ objects that keeps native RTTI intact.
+//! Vtable hooking of native C++ objects that keeps native RTTI intact.
+//!
+//! Compiler vtables are read-only, so patch mode is exercised on a shadow copy: a
+//! patch hook stacked on a shadow-hooked object overwrites that object's copy.
 
 use super::*;
-use cppvtable::hook::{ShadowVtable, patch_vtable_entry, swap_vtable};
+use cppvtable::hook::{HookMode, VtableHook};
 use cppvtable::rtti::RttiMetadata;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
@@ -57,21 +60,18 @@ unsafe fn rtti_intact(root: *mut c_void, secondary: *mut c_void) -> bool {
 }
 
 #[test]
-fn swapping_one_object_hooks_it_alone_and_keeps_native_rtti() {
+fn stacked_hooks_affect_one_object_and_keep_native_rtti() {
     let hooked = create_native(Class::Witness);
     let other = create_native(Class::Witness);
-    // SAFETY: Both Witness objects stay alive until deleted below. Witness's primary
-    // table has exactly `root_value` and `derived_value`, which the hooks implement
-    // with the native signature. No other thread touches these objects.
+    // SAFETY: Both Witness objects stay alive until deleted below, after both hooks
+    // drop in reverse order. Witness's primary table has exactly `root_value` and
+    // `derived_value`, which the hooks implement with the native signature. The
+    // patched table is the writable shadow copy. No other thread touches these objects.
     unsafe {
         let metadata = RttiMetadata::from_interface(ABI, hooked.root);
-        let native_table = hooked.root.cast::<*const c_void>().read();
-        let mut shadow = ShadowVtable::copy_native(native_table, metadata.prefix_size(), 2);
-        let original = shadow.replace(0, hooked_root as *const c_void);
-        ORIGINAL_ROOT.store(original.cast_mut(), Ordering::Relaxed);
-
-        let previous = swap_vtable(hooked.root, shadow.address_point());
-        assert_eq!(previous, native_table);
+        let mut shadow = VtableHook::new(hooked.root, metadata.prefix_size(), 2, HookMode::Shadow);
+        ORIGINAL_ROOT.store(shadow.original(0).cast_mut(), Ordering::Relaxed);
+        let _ = shadow.replace(0, hooked_root as *const c_void);
         assert_eq!(values(hooked.root), (111, 22));
         assert_eq!(values(other.root), (11, 22));
         assert!(rtti_intact(hooked.root, hooked.secondary));
@@ -80,19 +80,18 @@ fn swapping_one_object_hooks_it_alone_and_keeps_native_rtti() {
             type_descriptor(Class::Witness)
         );
 
-        // Patching a shared table in place reaches every object installed on it.
-        let _ = swap_vtable(other.root, shadow.address_point());
-        let derived =
-            patch_vtable_entry(shadow.address_point(), 1, patched_derived as *const c_void);
+        let mut patch = VtableHook::new(hooked.root, metadata.prefix_size(), 2, HookMode::Patch);
+        assert_eq!(patch.address_point(), shadow.address_point());
+        let _ = patch.replace(1, patched_derived as *const c_void);
         assert_eq!(values(hooked.root), (111, -1));
-        assert_eq!(values(other.root), (111, -1));
-        let _ = patch_vtable_entry(shadow.address_point(), 1, derived);
+        assert_eq!(values(other.root), (11, 22));
+        drop(patch);
+        assert_eq!(values(hooked.root), (111, 22));
 
-        let _ = swap_vtable(hooked.root, previous);
-        let _ = swap_vtable(other.root, previous);
+        drop(shadow);
         assert_eq!(values(hooked.root), (11, 22));
         assert_eq!(values(other.root), (11, 22));
-        drop(shadow);
+        assert!(rtti_intact(hooked.root, hooked.secondary));
         delete_native(hooked.complete, Class::Witness);
         delete_native(other.complete, Class::Witness);
     }
