@@ -1,0 +1,87 @@
+name: Compiler interoperability
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows ${{ matrix.compiler }} ${{ matrix.arch }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [msvc, clang-cl]
+        arch: [x64, x86]
+        include:
+          - arch: x64
+            target: x86_64-pc-windows-msvc
+          - arch: x86
+            target: i686-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v7
+      - name: Configure MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.arch }}
+      - name: Configure Rust and compiler
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+          if ('${{ matrix.compiler }}' -eq 'clang-cl') {
+            'CC=clang-cl' | Out-File -FilePath $env:GITHUB_ENV -Append
+            'CXX=clang-cl' | Out-File -FilePath $env:GITHUB_ENV -Append
+            'C:\Program Files\LLVM\bin' | Out-File -FilePath $env:GITHUB_PATH -Append
+          }
+      - name: Test debug and optimized foreign calls
+        run: |
+          cargo test --workspace --all-features --target ${{ matrix.target }}
+          cargo test -p cppvtable-cpp-tests --release --target ${{ matrix.target }}
+      - name: Check lints
+        run: cargo clippy --workspace --all-targets --all-features --target ${{ matrix.target }} -- -D warnings
+      - name: Run C++ example
+        run: cargo run -p cppvtable-example --target ${{ matrix.target }}
+
+  clang:
+    name: Linux Clang Itanium
+    runs-on: ubuntu-latest
+    env:
+      CC: clang
+      CXX: clang++
+      CPPVTABLE_REQUIRE_RELATIVE: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Configure Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy --component rustfmt
+          rustup default stable
+      - name: Check formatting and lints
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Test debug and optimized foreign calls
+        run: |
+          cargo test --workspace --all-features
+          cargo test -p cppvtable-cpp-tests --release
+      - name: Run C++ example
+        run: cargo run -p cppvtable-example
+      - name: Check Windows GNU x86 declarations
+        run: |
+          rustup target add i686-pc-windows-gnu
+          cargo check -p cppvtable-abi -p cppvtable --all-features --target i686-pc-windows-gnu
+
+  msrv:
+    name: Rust 1.85.1 MSRV
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Configure Rust
+        run: rustup toolchain install 1.85.1 --profile minimal
+      - name: Test workspace and native ABI fixtures
+        run: cargo +1.85.1 test --workspace --all-features

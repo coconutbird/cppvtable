@@ -1,19 +1,20 @@
 [package]
 name = "cppvtable"
+description = "Call and implement C and C++ virtual-table interfaces in Rust."
 version.workspace = true
 edition.workspace = true
-description = "C++ vtable interop for Rust (MSVC ABI compatible)"
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+cppvtable-abi.workspace = true
+cppvtable-macro.workspace = true
+
+[features]
+# Link the target C++ runtime's pointer `dynamic_cast` as `rtti::DynamicCastRuntime::TARGET`.
+native-dynamic-cast = ["cppvtable-abi/native-dynamic-cast"]
 
 [lints]
 workspace = true
-
-[features]
-default = []
-windows-compat = ["dep:windows-core"]
-
-[dependencies]
-cppvtable-macro = { workspace = true }
-paste = { workspace = true }
-windows-core = { workspace = true, optional = true }

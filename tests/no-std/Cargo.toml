@@ -1,0 +1,20 @@
+[package]
+name = "cppvtable-no-std-smoke"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[workspace]
+
+[features]
+windows-compat = ["cppvtable-com/windows-compat"]
+
+[dependencies]
+cppvtable = { path = "../../crates/cppvtable" }
+cppvtable-abi = { path = "../../crates/cppvtable-abi" }
+cppvtable-com = { path = "../../crates/cppvtable-com" }
+
+[lints.rust]
+warnings = "deny"
+

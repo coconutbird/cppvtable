@@ -1,0 +1,71 @@
+# Toolchain + tasks for cppvtable, managed by mise (https://mise.jdx.dev).
+#   mise install        provision stable Rust, the 1.85.1 MSRV, targets, and cargo-deny
+#   mise run ci         run every portable check that CI runs
+#
+# Native C++ fixtures need a C/C++ compiler (MSVC, clang-cl, or clang++); set CXX to
+# choose one. The x86 MSVC tasks only run on Windows.
+
+[tools]
+rust = [
+  { version = "stable", profile = "minimal", components = "clippy,rustfmt", targets = "thumbv7em-none-eabi,i686-pc-windows-msvc,i686-pc-windows-gnu" },
+  { version = "1.85.1", profile = "minimal", targets = "thumbv7em-none-eabi" },
+]
+"aqua:EmbarkStudios/cargo-deny" = "0.20"
+
+[tasks.fmt]
+description = "Check formatting of the workspace and the no_std consumer"
+run = [
+  "cargo fmt --all -- --check",
+  "cargo fmt --manifest-path tests/no-std/Cargo.toml -- --check",
+]
+
+[tasks.lint]
+description = "Clippy with warnings denied for the workspace and the no_std consumer"
+run = [
+  "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+  "cargo clippy --manifest-path tests/no-std/Cargo.toml --all-targets --all-features -- -D warnings",
+]
+
+[tasks.test]
+description = "Workspace tests plus optimized native ABI fixtures"
+run = [
+  "cargo test --workspace --all-features",
+  "cargo test -p cppvtable-cpp-tests --release",
+]
+
+[tasks.x86]
+description = "Windows only: tests and lints for i686-pc-windows-msvc (thiscall)"
+run = [
+  "cargo test --workspace --all-features --target i686-pc-windows-msvc",
+  "cargo test -p cppvtable-cpp-tests --release --target i686-pc-windows-msvc",
+  "cargo clippy --workspace --all-targets --all-features --target i686-pc-windows-msvc -- -D warnings",
+]
+
+[tasks.example]
+description = "Run the C++ interop example"
+run = "cargo run -p cppvtable-example"
+
+[tasks.msrv]
+description = "Workspace tests on the Rust 1.85.1 MSRV"
+run = "cargo +1.85.1 test --workspace --all-features"
+
+[tasks.no-std]
+description = "Check libraries and build/test the no_std consumer for thumbv7em-none-eabi"
+run = [
+  "cargo check -p cppvtable-abi -p cppvtable -p cppvtable-com --all-features --target thumbv7em-none-eabi",
+  "cargo build --manifest-path tests/no-std/Cargo.toml --all-features --target thumbv7em-none-eabi",
+  "cargo +1.85.1 build --manifest-path tests/no-std/Cargo.toml --all-features --target thumbv7em-none-eabi",
+  "cargo test --manifest-path tests/no-std/Cargo.toml --all-features",
+]
+
+[tasks.gnu-x86]
+description = "Type-check Windows GNU x86 declarations"
+run = "cargo check -p cppvtable-abi -p cppvtable --all-features --target i686-pc-windows-gnu"
+
+[tasks.deny]
+description = "Check advisories, licenses, bans, and sources"
+run = "cargo deny check"
+
+[tasks.ci]
+description = "Run every portable CI check"
+depends = ["fmt", "lint", "test", "example", "msrv", "no-std", "gnu-x86", "deny"]

@@ -1,129 +1,119 @@
-//! C++ VTable interop for Rust (MSVC ABI)
+//! Callable C/C++ interfaces and Rust implementations of foreign object layouts.
 //!
-//! This crate provides C++ compatible vtable layouts and Rust-side interface metadata.
+//! [`interface`] declares both a borrowed caller interface and its implementation
+//! trait. [`implement`] builds static vtables for a Rust type. [`OwnedObject`] keeps
+//! the resulting object at a stable address and controls its lifetime.
 //!
-//! ## Rust-side RTTI (Runtime Type Information)
+//! COM interfaces and their reference counting live in the separate `cppvtable-com`
+//! crate.
 //!
-//! The proc-macros generate unique interface IDs and interface-offset metadata. This enables:
-//! - Runtime type identification
-//! - Pointer-adjusted casting between interfaces implemented by Rust objects
+//! A borrowed interface cannot outlive its owner:
 //!
-//! This metadata is separate from native C++ RTTI and does not interoperate with
-//! `dynamic_cast` or `typeid`. The [`rtti::VTableWithRtti`] helper can manually place
-//! Rust [`rtti::TypeInfo`] at vtable slot -1 when that layout is desired.
-//!
-//! This crate provides two approaches for defining C++ compatible interfaces:
-//!
-//! ## Declarative macros (`decl` module)
-//! ```no_run
-//! use cppvtable::{define_class, define_interface};
-//!
-//! define_interface! {
-//!     interface IAnimal {
-//!         fn speak(&self);
-//!         [5] fn legs(&self) -> i32;  // explicit slot index
-//!     }
-//! }
-//!
-//! define_class! {
-//!     class Dog : IAnimal {
-//!         name: [u8; 32],
-//!     }
-//! }
+//! ```compile_fail
+//! use cppvtable::{implement, interface, OwnedObject};
+//! #[interface(abi = c)]
+//! unsafe trait IValue { fn value(&self) -> u32; }
+//! #[implement(IValue)]
+//! struct Value;
+//! impl IValueImpl for Value { fn value(&self) -> u32 { 7 } }
+//! let view = {
+//!     let owner = OwnedObject::new(Value);
+//!     owner.interface::<IValue>()
+//! };
+//! view.value();
 //! ```
 //!
-//! ## Proc-macros (`proc` module)
-//! ```no_run
-//! use cppvtable::proc::{cppvtable, cppvtable_impl};
+//! COM declarations use the separate crate:
 //!
-//! #[cppvtable]
-//! pub trait IAnimal {
-//!     fn speak(&self);
-//!     fn legs(&self) -> i32;
-//! }
-//!
-//! #[repr(C)]
-//! pub struct Dog {
-//!     vtable_i_animal: *const IAnimalVTable,
-//!     name: [u8; 32],
-//! }
-//!
-//! #[cppvtable_impl(IAnimal)]
-//! impl Dog {
-//!     fn speak(&self) { println!("Woof!"); }
-//!     fn legs(&self) -> i32 { 4 }
-//! }
+//! ```compile_fail
+//! #[cppvtable::interface(abi = com, iid = "00000000-0000-0000-C000-000000000046")]
+//! unsafe trait ICom { fn value(&self) -> u32; }
 //! ```
-//!
-//! ## Feature comparison
-//!
-//! | Feature | Declarative | Proc-macro |
-//! |---------|-------------|------------|
-//! | Slot indices `[N]` / `#[slot(N)]` | ✅ | ✅ |
-//! | thiscall (x86) | ✅ | ✅ |
-//! | Clean Rust syntax | ❌ | ✅ |
-//! | No separate crate | ✅ | N/A |
-//! | RTTI support | ✅ | ✅ |
-//! | Multiple inheritance | ✅ | ✅ |
 
-pub mod com;
-pub mod decl;
+//! Implementation methods preserve each declaration's method safety. Safe methods
+//! must support direct calls on standalone Rust values and every argument allowed by
+//! their Rust signatures. Declare `unsafe fn` and document the contract for methods
+//! requiring valid foreign pointers or an allocation-embedded `self`. Generated shims
+//! recover an embedded `self` before calling implementation methods. Thread access
+//! follows the interface and owner's contract; a shared reference alone does not
+//! authorize concurrent foreign calls.
+//!
+//! Calling an unsafe implementation method directly still requires `unsafe`:
+//!
+//! ```compile_fail,E0133
+//! use cppvtable::{implement, interface};
+//! #[interface(abi = c)]
+//! unsafe trait IReader {
+//!     /// # Safety
+//!     /// `input` must point to a live readable u32.
+//!     unsafe fn read(&self, input: *const u32) -> u32;
+//! }
+//! #[implement(IReader)]
+//! struct Reader;
+//! impl IReaderImpl for Reader {
+//!     unsafe fn read(&self, input: *const u32) -> u32 { unsafe { *input } }
+//! }
+//! let input = 7;
+//! IReaderImpl::read(&Reader, &input);
+//! ```
+//!
+//! Declared unsafety is preserved even for scalar methods without pointer parameters:
+//!
+//! ```compile_fail,E0133
+//! use cppvtable::{implement, interface};
+//! #[interface(abi = c)]
+//! unsafe trait IProtocol {
+//!     /// # Safety
+//!     /// The caller must establish the application's ready state.
+//!     unsafe fn ready_value(&self) -> u32;
+//! }
+//! #[implement(IProtocol)]
+//! struct Protocol;
+//! impl IProtocolImpl for Protocol { unsafe fn ready_value(&self) -> u32 { 7 } }
+//! IProtocolImpl::ready_value(&Protocol);
+//! ```
+//!
+//! A valid direct call can establish the documented argument precondition:
+//!
+//! ```
+//! use cppvtable::{implement, interface};
+//! #[interface(abi = c)]
+//! unsafe trait IReader {
+//!     fn value(&self) -> u32;
+//!     fn passthrough(&self, pointer: *const u32) -> *const u32;
+//!     /// # Safety
+//!     /// `input` must point to a live readable u32.
+//!     unsafe fn read(&self, input: *const u32) -> u32;
+//! }
+//! #[implement(IReader)]
+//! struct Reader;
+//! impl IReaderImpl for Reader {
+//!     fn value(&self) -> u32 { 5 }
+//!     fn passthrough(&self, pointer: *const u32) -> *const u32 { pointer }
+//!     unsafe fn read(&self, input: *const u32) -> u32 { unsafe { *input } }
+//! }
+//! let reader = Reader;
+//! let input = IReaderImpl::value(&reader);
+//! assert_eq!(IReaderImpl::passthrough(&reader, &input), &input as *const u32);
+//! // SAFETY: `input` remains alive and readable throughout the call.
+//! assert_eq!(unsafe { IReaderImpl::read(&reader, &input) }, 5);
+//! ```
+
+#![no_std]
+
+extern crate alloc;
+
+pub mod hook;
+
+mod object;
 pub mod rtti;
 
-// =============================================================================
-// VTableLayout - Trait for interface inheritance
-// =============================================================================
-
-/// Trait providing vtable layout information for interface inheritance.
-///
-/// This trait is automatically implemented by `#[cppvtable]` for each interface.
-/// It enables `extends(Base)` to inherit from another interface.
-///
-/// # Example
-/// ```ignore
-/// use cppvtable::proc::cppvtable;
-///
-/// #[cppvtable]
-/// pub trait IBase {
-///     fn base_method(&self);
-/// }
-///
-/// #[cppvtable(extends(IBase))]
-/// pub trait IDerived {
-///     fn derived_method(&self);  // Starts at slot 1
-/// }
-/// ```
-pub trait VTableLayout {
-    /// The number of vtable slots used by this interface (including inherited slots).
-    const SLOT_COUNT: usize;
-
-    /// The vtable struct type for this interface.
-    type VTable;
-}
-
-/// Proc-macro approach - re-exports from cppvtable-macro crate
-pub mod proc {
-    pub use cppvtable_macro::{com_implement, com_interface};
-    pub use cppvtable_macro::{cppvtable, cppvtable_impl};
-}
-
-// Re-export paste for use by declarative macros
 #[doc(hidden)]
-pub use paste::paste;
-
-// Re-export common types for macro use
-#[doc(hidden)]
-pub use std::ffi::c_void;
-#[doc(hidden)]
-pub use std::sync::atomic::{Ordering, compiler_fence};
-
-// Re-export RTTI types for macro-generated code
-#[doc(hidden)]
-pub use rtti::{InterfaceInfo, TypeInfo};
-
-// Re-export COM types for macro-generated code
-#[doc(hidden)]
-pub use com::{
-    ComRefCount, E_NOINTERFACE, E_POINTER, GUID, HRESULT, IID_IUNKNOWN, IUnknown, IUnknownVTable,
-    S_OK, make_guid,
+pub use cppvtable_abi::interface::RawInterface;
+pub use cppvtable_abi::{Interface, InterfaceRef, VtableLayout, VtablePtr};
+pub use cppvtable_macro::{
+    implement_native as implement, interface_native as interface, vtable_fn,
+};
+pub use object::{
+    CppInterface, Implement, Implements, InterfaceDescriptor, Object, OwnedObject, interface_of,
 };

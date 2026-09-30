@@ -1,0 +1,28 @@
+name: no_std consumers
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bare-metal:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        toolchain: [stable, "1.85.1"]
+    env:
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Configure Rust and bare-metal target
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --target thumbv7em-none-eabi
+      - name: Check all library features without std
+        run: cargo check -p cppvtable-abi -p cppvtable -p cppvtable-com --all-features --target thumbv7em-none-eabi
+      - name: Build generated interfaces in a no_std consumer
+        run: cargo build --manifest-path tests/no-std/Cargo.toml --all-features --target thumbv7em-none-eabi
+      - name: Exercise the no_std consumer on the host
+        run: cargo test --manifest-path tests/no-std/Cargo.toml --all-features

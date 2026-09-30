@@ -1,24 +1,50 @@
 //! C++ interop tests for cppvtable
 //!
-//! This crate verifies that cppvtable's vtable layout matches MSVC's C++ vtable layout.
-//! Requires MSVC to build and run.
+//! Exercises matching method-only interfaces using the target C++ compiler.
+//! Supports MSVC, clang-cl, and Clang with the Itanium ABI.
 //!
 //! Run with: `cargo test -p cppvtable-cpp-tests`
 
 #![recursion_limit = "512"]
 
 use cpp::cpp;
-use cppvtable::proc::{cppvtable, cppvtable_impl};
+#[cfg(test)]
+use cppvtable::{implement, interface};
+use cppvtable_abi::interface as abi_interface;
 use std::ffi::c_void;
 
 #[cfg(test)]
+mod c_table;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "compiler fixtures are used in tests")
+)]
+mod com;
+#[cfg(test)]
+mod conventions;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "compiler fixtures are used in tests")
+)]
+mod inheritance;
+#[cfg(test)]
+mod inline;
+#[cfg(test)]
 mod multi;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "compiler fixtures are used in tests")
+)]
+mod returns;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "compiler fixtures are used in tests")
+)]
+mod rtti;
 #[cfg(test)]
 mod single;
 
-// =============================================================================
-// C++ code compiled by MSVC
-// =============================================================================
+// C++ code compiled by the target compiler
 
 cpp! {{
     #include <cstdio>
@@ -32,12 +58,12 @@ cpp! {{
     };
 
     // Concrete C++ implementation
-    class CppDog : public ICppAnimal {
+    class CppDog final : public ICppAnimal {
     public:
         char name[32];
 
         CppDog(const char* n) {
-            strncpy_s(name, sizeof(name), n, _TRUNCATE);
+            std::snprintf(name, sizeof(name), "%s", n);
         }
 
         void speak() override {
@@ -49,7 +75,7 @@ cpp! {{
         }
     };
 
-    class CppCat : public ICppAnimal {
+    class CppCat final : public ICppAnimal {
     public:
         int lives;
 
@@ -64,9 +90,7 @@ cpp! {{
         }
     };
 
-    // ==========================================================================
     // Multiple inheritance interfaces and classes
-    // ==========================================================================
 
     class ISwimmer {
     public:
@@ -81,7 +105,7 @@ cpp! {{
     };
 
     // Duck implements both ISwimmer and IFlyer (multiple inheritance)
-    class CppDuck : public ISwimmer, public IFlyer {
+    class CppDuck final : public ISwimmer, public IFlyer {
     public:
         int speed;
 
@@ -97,12 +121,13 @@ cpp! {{
     };
 }}
 
-// =============================================================================
 // C++ helper functions
 // Note: These cannot use #[cfg(test)] because cpp_build needs to see them
-// =============================================================================
 
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "compiled for cpp_build and used in tests")
+)]
 fn create_cpp_dog(name: &str) -> *mut c_void {
     let name_ptr = name.as_ptr();
     let name_len = name.len();
@@ -114,157 +139,222 @@ fn create_cpp_dog(name: &str) -> *mut c_void {
     })
 }
 
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "compiled for cpp_build and used in tests")
+)]
 fn create_cpp_cat(lives: i32) -> *mut c_void {
     cpp!(unsafe [lives as "int"] -> *mut c_void as "void*" {
         return new CppCat(lives);
     })
 }
 
-#[allow(dead_code)]
-fn cpp_call_legs(animal: *mut c_void) -> i32 {
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "compiled for cpp_build and used in tests")
+)]
+/// # Safety
+/// The object pointer must identify the matching live C++ interface or concrete object.
+unsafe fn cpp_call_legs(animal: *mut c_void) -> i32 {
     cpp!(unsafe [animal as "ICppAnimal*"] -> i32 as "int" {
         return animal->legs();
     })
 }
 
-#[allow(dead_code)]
-fn delete_cpp_animal(animal: *mut c_void) {
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "compiled for cpp_build and used in tests")
+)]
+/// # Safety
+/// The pointer must identify the matching live C++ concrete allocation, owned by the caller.
+unsafe fn delete_cpp_dog(animal: *mut c_void) {
     cpp!(unsafe [animal as "ICppAnimal*"] {
-        delete animal;
-    })
+        delete static_cast<CppDog*>(animal);
+    });
 }
 
-#[allow(dead_code)]
-fn cpp_call_rust_legs(rust_animal: *mut c_void) -> i32 {
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "compiled for cpp_build and used in tests")
+)]
+/// # Safety
+/// The object pointer must identify the matching live C++ interface or concrete object.
+unsafe fn cpp_call_rust_legs(rust_animal: *mut c_void) -> i32 {
     cpp!(unsafe [rust_animal as "ICppAnimal*"] -> i32 as "int" {
         return rust_animal->legs();
     })
 }
 
 // Multiple inheritance helpers
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "compiled for cpp_build and used in tests")
+)]
 fn create_cpp_duck(speed: i32) -> *mut c_void {
     cpp!(unsafe [speed as "int"] -> *mut c_void as "void*" {
         return new CppDuck(speed);
     })
 }
 
-#[allow(dead_code)]
-fn delete_cpp_duck(duck: *mut c_void) {
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "compiled for cpp_build and used in tests")
+)]
+/// # Safety
+/// The pointer must identify the matching live C++ concrete allocation, owned by the caller.
+unsafe fn delete_cpp_duck(duck: *mut c_void) {
     cpp!(unsafe [duck as "CppDuck*"] {
         delete duck;
-    })
+    });
 }
 
-#[allow(dead_code)]
-fn cpp_duck_as_swimmer(duck: *mut c_void) -> *mut c_void {
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "compiled for cpp_build and used in tests")
+)]
+/// # Safety
+/// The object pointer must identify the matching live C++ interface or concrete object.
+unsafe fn cpp_duck_as_swimmer(duck: *mut c_void) -> *mut c_void {
     cpp!(unsafe [duck as "CppDuck*"] -> *mut c_void as "void*" {
         return static_cast<ISwimmer*>(duck);
     })
 }
 
-#[allow(dead_code)]
-fn cpp_duck_as_flyer(duck: *mut c_void) -> *mut c_void {
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "compiled for cpp_build and used in tests")
+)]
+/// # Safety
+/// The object pointer must identify the matching live C++ interface or concrete object.
+unsafe fn cpp_duck_as_flyer(duck: *mut c_void) -> *mut c_void {
     cpp!(unsafe [duck as "CppDuck*"] -> *mut c_void as "void*" {
         return static_cast<IFlyer*>(duck);
     })
 }
 
-#[allow(dead_code)]
-fn cpp_call_swim_speed(swimmer: *mut c_void) -> i32 {
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "compiled for cpp_build and used in tests")
+)]
+/// # Safety
+/// The object pointer must identify the matching live C++ interface or concrete object.
+unsafe fn cpp_call_swim_speed(swimmer: *mut c_void) -> i32 {
     cpp!(unsafe [swimmer as "ISwimmer*"] -> i32 as "int" {
         return swimmer->swim_speed();
     })
 }
 
-#[allow(dead_code)]
-fn cpp_call_fly_speed(flyer: *mut c_void) -> i32 {
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "compiled for cpp_build and used in tests")
+)]
+/// # Safety
+/// The object pointer must identify the matching live C++ interface or concrete object.
+unsafe fn cpp_call_fly_speed(flyer: *mut c_void) -> i32 {
     cpp!(unsafe [flyer as "IFlyer*"] -> i32 as "int" {
         return flyer->fly_speed();
     })
 }
 
-// =============================================================================
-// Rust interface matching C++ ICppAnimal
-// =============================================================================
+// Rust interfaces matching the C++ classes
 
-#[cppvtable]
-pub trait IAnimal {
+#[cfg(test)]
+#[interface(abi = cpp)]
+unsafe trait IAnimal {
     fn speak(&self);
     fn legs(&self) -> i32;
 }
 
-// =============================================================================
-// Multiple inheritance interfaces
-// =============================================================================
+/// A borrowed ABI wrapper for the C++ animal implementation.
+#[abi_interface(abi = cpp)]
+pub unsafe trait IForeignAnimal {
+    /// Speak through the C++ vtable.
+    fn speak(&self);
+    /// Give the number of legs.
+    fn legs(&self) -> i32;
+}
 
-#[cppvtable]
-pub trait ISwimmer {
+#[cfg(test)]
+#[interface(abi = cpp)]
+unsafe trait ISwimmer {
     fn swim_speed(&self) -> i32;
     fn swim(&self);
 }
 
-#[cppvtable]
-pub trait IFlyer {
+#[cfg(test)]
+#[interface(abi = cpp)]
+unsafe trait IFlyer {
     fn fly_speed(&self) -> i32;
     fn fly(&self);
 }
 
-/// Rust Duck implementing both ISwimmer and IFlyer
-#[repr(C)]
-pub struct Duck {
-    vtable_i_swimmer: *const ISwimmerVTable,
-    vtable_i_flyer: *const IFlyerVTable,
-    pub speed: i32,
+/// A borrowed ABI wrapper for the C++ swimmer implementation.
+#[abi_interface(abi = cpp)]
+pub unsafe trait IForeignSwimmer {
+    /// Give the swim speed.
+    fn swim_speed(&self) -> i32;
+    /// Swim.
+    fn swim(&self);
 }
 
-#[cppvtable_impl(ISwimmer)]
-impl Duck {
+/// A borrowed ABI wrapper for the C++ flyer implementation.
+#[abi_interface(abi = cpp)]
+pub unsafe trait IForeignFlyer {
+    /// Give the fly speed.
+    fn fly_speed(&self) -> i32;
+    /// Fly.
+    fn fly(&self);
+}
+
+// Rust objects exposed through C++ interfaces
+
+#[cfg(test)]
+#[implement(ISwimmer, IFlyer)]
+struct Duck {
+    speed: i32,
+}
+
+#[cfg(test)]
+impl ISwimmerImpl for Duck {
     fn swim_speed(&self) -> i32 {
         self.speed
     }
+
     fn swim(&self) {
         println!("Duck swimming at {}", self.speed);
     }
 }
 
-#[cppvtable_impl(IFlyer)]
-impl Duck {
+#[cfg(test)]
+impl IFlyerImpl for Duck {
     fn fly_speed(&self) -> i32 {
         self.speed * 2
     }
+
     fn fly(&self) {
         println!("Duck flying at {}", self.speed * 2);
     }
 }
 
+#[cfg(test)]
 impl Duck {
-    pub fn new(speed: i32) -> Self {
-        Duck {
-            vtable_i_swimmer: Self::VTABLE_I_SWIMMER,
-            vtable_i_flyer: Self::VTABLE_I_FLYER,
-            speed,
-        }
+    fn new(speed: i32) -> Self {
+        Self { speed }
     }
 }
 
-// =============================================================================
-// Single inheritance structs
-// =============================================================================
-
-#[repr(C)]
-pub struct Dog {
-    vtable_i_animal: *const IAnimalVTable,
-    pub name: [u8; 32],
+#[cfg(test)]
+#[implement(IAnimal)]
+struct Dog {
+    name: [u8; 32],
 }
 
-#[cppvtable_impl(IAnimal)]
-impl Dog {
+#[cfg(test)]
+impl IAnimalImpl for Dog {
     fn speak(&self) {
         let name_len = self.name.iter().position(|&b| b == 0).unwrap_or(32);
         let name = std::str::from_utf8(&self.name[..name_len]).unwrap_or("???");
-        println!("{} says: Woof!", name);
+        println!("{name} says: Woof!");
     }
 
     fn legs(&self) -> i32 {
@@ -272,12 +362,10 @@ impl Dog {
     }
 }
 
+#[cfg(test)]
 impl Dog {
-    pub fn new(name: &str) -> Self {
-        let mut dog = Dog {
-            vtable_i_animal: Self::VTABLE_I_ANIMAL,
-            name: [0u8; 32],
-        };
+    fn new(name: &str) -> Self {
+        let mut dog = Self { name: [0_u8; 32] };
         let bytes = name.as_bytes();
         let len = bytes.len().min(31);
         dog.name[..len].copy_from_slice(&bytes[..len]);
@@ -285,14 +373,14 @@ impl Dog {
     }
 }
 
-#[repr(C)]
-pub struct Cat {
-    vtable_i_animal: *const IAnimalVTable,
-    pub lives: i32,
+#[cfg(test)]
+#[implement(IAnimal)]
+struct Cat {
+    lives: i32,
 }
 
-#[cppvtable_impl(IAnimal)]
-impl Cat {
+#[cfg(test)]
+impl IAnimalImpl for Cat {
     fn speak(&self) {
         println!("Cat with {} lives says: Meow!", self.lives);
     }
@@ -302,11 +390,21 @@ impl Cat {
     }
 }
 
+#[cfg(test)]
 impl Cat {
-    pub fn new(lives: i32) -> Self {
-        Cat {
-            vtable_i_animal: Self::VTABLE_I_ANIMAL,
-            lives,
-        }
+    fn new(lives: i32) -> Self {
+        Self { lives }
     }
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "compiled for cpp_build and used in tests")
+)]
+/// # Safety
+/// The pointer must identify the matching live C++ concrete allocation, owned by the caller.
+unsafe fn delete_cpp_cat(animal: *mut c_void) {
+    cpp!(unsafe [animal as "ICppAnimal*"] {
+        delete static_cast<CppCat*>(animal);
+    });
 }

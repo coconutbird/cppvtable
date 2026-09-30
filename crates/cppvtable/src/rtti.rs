@@ -1,434 +1,308 @@
-//! Runtime Type Information (RTTI) for C++ vtable interop
+//! Native C++ RTTI metadata and object integration.
 //!
-//! This module provides **Rust-side RTTI** for runtime interface casting.
-//! This is completely separate from C++ RTTI and does not interoperate with it.
-//!
-//! ## Important: No C++ RTTI Support
-//!
-//! This crate does **not** support C++ native RTTI (`dynamic_cast`, `typeid`).
-//! C++ RTTI uses complex ABI-specific structures (MSVC's `_RTTICompleteObjectLocator`,
-//! Itanium's `__class_type_info`) stored at vtable slot -1. Parsing these would require:
-//! - ABI-specific code for MSVC vs GCC/Clang
-//! - Walking complex class hierarchy descriptors
-//! - Handling virtual inheritance offsets
-//!
-//! If you need to cast C++ objects at runtime, the C++ code should expose its own
-//! casting mechanism (like COM's `QueryInterface`).
-//!
-//! ## What This Module Provides
-//!
-//! Rust-side type metadata for Rust objects implementing C++ interfaces:
-//! - [`TypeInfo`] - describes a Rust type and its implemented interfaces
-//! - [`InterfaceInfo`] - offset information for casting between interfaces
-//! - [`cast_to()`](TypeInfo::cast_to) - runtime casting between interfaces
-//!
-//! ## Optional Memory Layout
-//!
-//! [`VTableWithRtti`] can manually place Rust [`TypeInfo`] at slot -1:
-//!
-//! ```text
-//! VTable in memory (with Rust RTTI):
-//! ┌─────────────────┐
-//! │ TypeInfo*       │  ← slot -1 (offset -8 on x64, -4 on x86)
-//! ├─────────────────┤
-//! │ method_0        │  ← slot 0 (vtable pointer points here)
-//! │ method_1        │  ← slot 1
-//! │ ...             │
-//! └─────────────────┘
-//! ```
-//!
-//! The object's vtable pointer points to slot 0. [`get_type_info`] reads the
-//! pointer at offset -1. Proc-macro-generated vtables do not use this wrapper
-//! automatically.
+//! [`RttiClass`] validates compiler-produced RTTI once per Rust implementation and
+//! owns the prefixed callback tables. [`RttiObject::new`] then allocates objects whose
+//! headers point at those shared tables; each object borrows its class. Type identity
+//! and the inheritance graph come from the native compiler; ordinary
+//! [`crate::OwnedObject::new`] objects do not have RTTI. The ABI inspection APIs
+//! below are allocation-free. Building an [`RttiClass`] uses `alloc`.
 
-use std::ffi::c_void;
+pub use cppvtable_abi::rtti::*;
 
-/// Information about a single interface implementation
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct InterfaceInfo {
-    /// Unique identifier for the interface (address of a static marker)
-    pub interface_id: *const u8,
-    /// Byte offset from object start to this interface's vtable pointer
-    pub offset: isize,
+use alloc::vec;
+use alloc::vec::Vec;
+use core::any::type_name;
+use core::ffi::c_void;
+use core::fmt;
+use core::marker::PhantomData;
+use core::mem::size_of;
+use core::ops::Deref;
+
+use crate::hook::ShadowVtable;
+use crate::{CppInterface, Implement, Implements, Object, OwnedObject, VtableLayout};
+
+/// A structural mismatch detected before installing native RTTI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RttiError {
+    /// Every C++ pointer interface needs metadata, and C interfaces take none.
+    InterfaceKind,
+    /// The metadata uses a different C++ ABI from the interface declaration.
+    AbiMismatch,
+    /// The native subobject offset differs from the generated Rust object layout.
+    OffsetMismatch,
+    /// The interfaces describe different complete native types.
+    TypeMismatch,
+    /// The native locator requires construction-displacement state absent from Rust objects.
+    ConstructionTable,
+    /// The native hierarchy needs virtual-base object storage absent from Rust objects.
+    VirtualInheritance,
+    /// This RTTI representation requires a different callback table encoding.
+    UnsupportedVariant,
+    /// The function table cannot be represented with the native pointer layout.
+    TableLayout,
 }
 
-// SAFETY: InterfaceInfo only contains a pointer to a static and an offset
-unsafe impl Send for InterfaceInfo {}
-unsafe impl Sync for InterfaceInfo {}
-
-impl std::fmt::Debug for InterfaceInfo {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("InterfaceInfo")
-            .field("interface_id", &(self.interface_id as usize))
-            .field("offset", &self.offset)
-            .finish()
+impl fmt::Display for RttiError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::InterfaceKind => "RTTI requires metadata for C++ pointer interfaces only",
+            Self::AbiMismatch => "RTTI metadata ABI does not match the interface",
+            Self::OffsetMismatch => "RTTI subobject offset does not match the Rust header",
+            Self::TypeMismatch => "RTTI tables describe different complete types",
+            Self::ConstructionTable => "RTTI metadata requires construction-displacement state",
+            Self::VirtualInheritance => "Rust RTTI objects support nonvirtual inheritance only",
+            Self::UnsupportedVariant => {
+                "RTTI representation cannot prefix pointer-based callback tables"
+            }
+            Self::TableLayout => "RTTI callback table has an unsupported size or alignment",
+        })
     }
 }
 
-impl InterfaceInfo {
-    /// Create a new InterfaceInfo
-    pub const fn new(interface_id: *const u8, offset: isize) -> Self {
-        Self {
-            interface_id,
-            offset,
-        }
-    }
+impl core::error::Error for RttiError {}
+
+/// Validated native RTTI for every object of the Rust implementation `T`.
+///
+/// Build one per implementation and native class with [`Self::builder`], then create
+/// objects with [`RttiObject::new`]. Objects copy the class's interface headers, so
+/// creating one costs no more than [`crate::OwnedObject::new`]. The class owns the
+/// prefixed callback tables; every object borrows the class, so it cannot be dropped
+/// first.
+pub struct RttiClass<T: Implement> {
+    vtables: T::Vtables,
+    // Owns the tables addressed by `vtables`.
+    tables: Vec<ShadowVtable>,
 }
 
-/// Runtime type information for a concrete class
-#[repr(C)]
-#[derive(Debug)]
-pub struct TypeInfo {
-    /// Unique identifier for this concrete type
-    pub type_id: usize,
-    /// Human-readable type name (for debugging)
-    pub type_name: &'static str,
-    /// List of implemented interfaces with their offsets
-    pub interfaces: &'static [InterfaceInfo],
-}
-
-impl TypeInfo {
-    /// Create a new TypeInfo
-    pub const fn new(
-        type_id: usize,
-        type_name: &'static str,
-        interfaces: &'static [InterfaceInfo],
-    ) -> Self {
-        Self {
-            type_id,
-            type_name,
-            interfaces,
+impl<T: Implement> RttiClass<T> {
+    /// Start collecting native metadata for each C++ interface of `T`.
+    ///
+    /// ```ignore
+    /// // SAFETY: The metadata describes a native class matching `Widget`'s interfaces.
+    /// let class = unsafe {
+    ///     RttiClass::<Widget>::builder()
+    ///         .with::<IDerived>(primary)
+    ///         .with::<ISecondary>(secondary)
+    ///         .build()
+    /// }?;
+    /// ```
+    #[must_use]
+    pub fn builder() -> RttiClassBuilder<T> {
+        RttiClassBuilder {
+            metadata: vec![None; T::INTERFACES.len()],
+            implementation: PhantomData,
         }
     }
 
-    /// Cast object pointer to a different interface, returns adjusted pointer or null
+    /// Interface headers for a new object; C++ entries address the owned tables.
+    pub(crate) fn vtables(&self) -> T::Vtables {
+        self.vtables
+    }
+}
+
+impl<T: Implement> fmt::Debug for RttiClass<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "RttiClass<{}>", type_name::<T>())?;
+        formatter.debug_list().entries(&self.tables).finish()
+    }
+}
+
+/// Native metadata for the C++ interfaces of `T`, keyed by interface type.
+///
+/// Create with [`RttiClass::builder`]. C interfaces take no metadata.
+pub struct RttiClassBuilder<T: Implement> {
+    // One entry per interface header, in `#[implement]` order.
+    metadata: Vec<Option<RttiMetadata>>,
+    implementation: PhantomData<fn() -> T>,
+}
+
+impl<T: Implement> RttiClassBuilder<T> {
+    /// Supply the native metadata of the directly implemented C++ interface `I`.
+    ///
+    /// Supplying `I` again replaces its earlier metadata. The metadata can be captured
+    /// from compiler-generated tables using [`RttiMetadata`]. Naming a C interface is a
+    /// compile-time error.
+    #[must_use]
+    pub fn with<I: CppInterface>(mut self, metadata: RttiMetadata) -> Self
+    where
+        T: Implements<I>,
+    {
+        const {
+            assert!(
+                I::CPP_ABI.is_some(),
+                "RTTI metadata applies to C++ interfaces only"
+            );
+        };
+        self.metadata[<T as Implements<I>>::SLOT] = Some(metadata);
+        self
+    }
+
+    /// Validate the metadata and build the prefixed callback tables.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RttiError::InterfaceKind`] if a C++ interface was not supplied, and
+    /// other [`RttiError`] variants for mismatched ABIs, type identities, offsets,
+    /// unsupported table layouts or RTTI representations, construction tables, or
+    /// Microsoft metadata marked with virtual inheritance. Checked structural
+    /// mismatches may be supplied and are rejected here.
     ///
     /// # Safety
-    /// - `object_ptr` must point to a valid instance of the type this TypeInfo describes
-    #[must_use = "cast_to returns the adjusted pointer; discarding it is likely a bug"]
-    pub unsafe fn cast_to(
-        &self,
-        object_ptr: *const c_void,
-        interface_id: *const u8,
-    ) -> *const c_void {
-        for info in self.interfaces {
-            if std::ptr::eq(info.interface_id, interface_id) {
-                // SAFETY: Caller guarantees object_ptr is valid and offset is correct for this type
-                return unsafe { (object_ptr as *const u8).offset(info.offset) as *const c_void };
+    ///
+    /// Metadata that passes the structural checks must describe one compatible
+    /// complete C++ class, with exactly the same interface subobjects, inheritance,
+    /// offsets, and callback contracts. Only nonvirtual inheritance is supported for
+    /// Rust-created objects; this is checked for Microsoft metadata only. All base
+    /// subobjects reachable by RTTI must exist at the declared offsets; equal offsets
+    /// and type names alone do not establish this. Native code may call declared
+    /// virtual methods and use RTTI on objects built from this class, but must not
+    /// access undeclared C++ data, invoke constructors/destructors, or delete a Rust
+    /// allocation. Callback calls must dispatch through the table: native
+    /// final/devirtualized method bodies must not replace Rust callbacks. The metadata
+    /// contract of [`RttiMetadata`] applies for as long as objects of this class exist.
+    pub unsafe fn build(self) -> Result<RttiClass<T>, RttiError> {
+        let supplied = self.metadata;
+        let mut vtables = T::vtables();
+        let headers = core::ptr::from_mut(&mut vtables).cast::<u8>();
+        let mut tables = Vec::new();
+        let mut type_info = None;
+        for (index, (descriptor, metadata)) in T::INTERFACES.iter().zip(supplied).enumerate() {
+            let Some(abi) = descriptor.cpp_abi else {
+                if metadata.is_some() {
+                    return Err(RttiError::InterfaceKind);
+                }
+                continue;
+            };
+            let metadata = metadata.ok_or(RttiError::InterfaceKind)?;
+            if descriptor.layout != VtableLayout::Pointer {
+                return Err(RttiError::InterfaceKind);
             }
+            if metadata.abi() != abi {
+                return Err(RttiError::AbiMismatch);
+            }
+            if !metadata.supports_pointer_tables() {
+                return Err(RttiError::UnsupportedVariant);
+            }
+            let offset = T::SLOT_OFFSETS[index];
+            let signed_offset = isize::try_from(offset).map_err(|_| RttiError::OffsetMismatch)?;
+            if metadata.offset_to_top() != -signed_offset {
+                return Err(RttiError::OffsetMismatch);
+            }
+            if metadata.construction_displacement() != 0 {
+                return Err(RttiError::ConstructionTable);
+            }
+            if metadata
+                .msvc_hierarchy_flags()
+                .is_some_and(|flags| flags & 2 != 0)
+            {
+                return Err(RttiError::VirtualInheritance);
+            }
+            let identity = metadata.type_info();
+            if type_info.is_some_and(|previous| previous != identity) {
+                return Err(RttiError::TypeMismatch);
+            }
+            type_info = Some(identity);
+            let entry = size_of::<*const c_void>();
+            if descriptor.table_size % entry != 0 || descriptor.table_align > entry {
+                return Err(RttiError::TableLayout);
+            }
+            let table =
+                ShadowVtable::allocate(metadata.prefix_size(), descriptor.table_size / entry)
+                    .ok_or(RttiError::TableLayout)?;
+            // SAFETY: The allocation holds the prefix followed by `table_size` bytes.
+            // Implement's contract supplies a static table of exactly that size, and
+            // places a pointer-layout header at `offset` inside `Vtables`.
+            unsafe {
+                metadata.write_prefix(table.prefix());
+                core::ptr::copy_nonoverlapping(
+                    T::vtable_slots()[index].as_ptr().cast::<u8>(),
+                    table.address_point().cast_mut().cast::<u8>(),
+                    descriptor.table_size,
+                );
+                headers
+                    .add(offset)
+                    .cast::<*const c_void>()
+                    .write_unaligned(table.address_point());
+            }
+            tables.push(table);
         }
-        std::ptr::null()
+        Ok(RttiClass { vtables, tables })
     }
+}
 
-    /// Check if this type implements a given interface
+impl<T: Implement> fmt::Debug for RttiClassBuilder<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "RttiClassBuilder<{}>", type_name::<T>())?;
+        formatter.debug_list().entries(&self.metadata).finish()
+    }
+}
+
+/// Sole ownership of an object whose C++ interfaces carry native RTTI.
+///
+/// Dereferences to [`OwnedObject`] for values and interfaces. The borrow of its
+/// [`RttiClass`] keeps the prefixed callback tables alive until the object is gone:
+///
+/// ```compile_fail,E0515
+/// use cppvtable::Implement;
+/// use cppvtable::rtti::{RttiClass, RttiObject};
+/// fn outlive<T: Implement>(value: T, class: RttiClass<T>) -> RttiObject<'static, T> {
+///     RttiObject::new(value, &class)
+/// }
+/// ```
+pub struct RttiObject<'c, T: Implement> {
+    owner: OwnedObject<T>,
+    class: PhantomData<&'c RttiClass<T>>,
+}
+
+impl<'c, T: Implement> RttiObject<'c, T> {
+    /// Allocate an object using the headers and tables of `class`.
     #[must_use]
-    pub fn implements(&self, interface_id: *const u8) -> bool {
-        self.interfaces
-            .iter()
-            .any(|i| std::ptr::eq(i.interface_id, interface_id))
-    }
-}
-
-/// Trait for types that have RTTI
-pub trait HasTypeInfo {
-    /// Get the TypeInfo for this type
-    fn type_info() -> &'static TypeInfo;
-}
-
-/// Retrieve TypeInfo from a vtable pointer (slot -1)
-///
-/// # Safety
-/// - `vtable_ptr` must point to a valid vtable with TypeInfo at slot -1
-/// - The vtable must be stored in [`VTableWithRtti`] or an equivalent layout
-#[inline]
-pub unsafe fn get_type_info(vtable_ptr: *const c_void) -> &'static TypeInfo {
-    // SAFETY: Caller guarantees vtable has RTTI at slot -1
-    unsafe {
-        let rtti_ptr = (vtable_ptr as *const *const TypeInfo).offset(-1);
-        &**rtti_ptr
-    }
-}
-
-/// Helper to generate a unique interface ID from a static address
-///
-/// Usage: `static IID_IFOO: InterfaceId = interface_id!();`
-#[macro_export]
-macro_rules! interface_id {
-    () => {{
-        static __ID: u8 = 0;
-        &__ID as *const u8 as usize
-    }};
-}
-
-/// Wrapper for vtables with RTTI at slot -1
-///
-/// This struct is laid out so that `methods` is at offset sizeof(pointer),
-/// allowing the vtable pointer to point to `methods` while `rtti` is at
-/// the negative offset.
-#[repr(C)]
-pub struct VTableWithRtti<T> {
-    /// TypeInfo pointer (slot -1 when viewed from methods pointer)
-    pub rtti: *const TypeInfo,
-    /// The actual vtable methods
-    pub methods: T,
-}
-
-impl<T> VTableWithRtti<T> {
-    /// Create a new vtable wrapper with RTTI
-    pub const fn new(rtti: &'static TypeInfo, methods: T) -> Self {
-        Self { rtti, methods }
-    }
-
-    /// Get a pointer to the methods (what the object's vtable pointer should store)
-    pub const fn vtable_ptr(&self) -> *const T {
-        &self.methods
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // Test interface IDs (unique static addresses)
-    static IID_FIRST: u8 = 0;
-    static IID_SECOND: u8 = 0;
-    static IID_THIRD: u8 = 0;
-
-    fn first_id() -> *const u8 {
-        &IID_FIRST
-    }
-    fn second_id() -> *const u8 {
-        &IID_SECOND
-    }
-    fn third_id() -> *const u8 {
-        &IID_THIRD
-    }
-
-    #[test]
-    fn test_interface_info_new() {
-        let info = InterfaceInfo::new(first_id(), 8);
-        assert!(std::ptr::eq(info.interface_id, first_id()));
-        assert_eq!(info.offset, 8);
-    }
-
-    #[test]
-    fn test_interface_info_zero_offset() {
-        let info = InterfaceInfo::new(first_id(), 0);
-        assert_eq!(info.offset, 0);
-    }
-
-    #[test]
-    fn test_interface_info_debug() {
-        let info = InterfaceInfo::new(first_id(), 16);
-        let debug_str = format!("{:?}", info);
-        assert!(debug_str.contains("InterfaceInfo"));
-        assert!(debug_str.contains("offset"));
-        assert!(debug_str.contains("16"));
-    }
-
-    #[test]
-    fn test_type_info_new() {
-        static INTERFACES: [InterfaceInfo; 0] = [];
-        let ti = TypeInfo::new(42, "TestType", &INTERFACES);
-        assert_eq!(ti.type_id, 42);
-        assert_eq!(ti.type_name, "TestType");
-        assert_eq!(ti.interfaces.len(), 0);
-    }
-
-    #[test]
-    fn test_type_info_with_interfaces() {
-        static INTERFACES: [InterfaceInfo; 2] = [
-            InterfaceInfo {
-                interface_id: std::ptr::null(), // Will compare by address anyway
-                offset: 0,
-            },
-            InterfaceInfo {
-                interface_id: std::ptr::null(),
-                offset: 8,
-            },
-        ];
-        let ti = TypeInfo::new(1, "MultiInterface", &INTERFACES);
-        assert_eq!(ti.interfaces.len(), 2);
-        assert_eq!(ti.interfaces[0].offset, 0);
-        assert_eq!(ti.interfaces[1].offset, 8);
-    }
-
-    #[test]
-    fn test_implements_returns_true() {
-        static INTERFACES: [InterfaceInfo; 2] = [
-            InterfaceInfo {
-                interface_id: &IID_FIRST,
-                offset: 0,
-            },
-            InterfaceInfo {
-                interface_id: &IID_SECOND,
-                offset: 8,
-            },
-        ];
-        let ti = TypeInfo::new(1, "Test", &INTERFACES);
-
-        assert!(ti.implements(first_id()));
-        assert!(ti.implements(second_id()));
-    }
-
-    #[test]
-    fn test_implements_returns_false_for_unknown() {
-        static INTERFACES: [InterfaceInfo; 2] = [
-            InterfaceInfo {
-                interface_id: &IID_FIRST,
-                offset: 0,
-            },
-            InterfaceInfo {
-                interface_id: &IID_SECOND,
-                offset: 8,
-            },
-        ];
-        let ti = TypeInfo::new(1, "Test", &INTERFACES);
-
-        assert!(!ti.implements(third_id()));
-    }
-
-    #[test]
-    fn test_implements_empty_interfaces() {
-        static INTERFACES: [InterfaceInfo; 0] = [];
-        let ti = TypeInfo::new(1, "Empty", &INTERFACES);
-
-        assert!(!ti.implements(first_id()));
-    }
-
-    #[test]
-    fn test_cast_to_primary_interface() {
-        static INTERFACES: [InterfaceInfo; 2] = [
-            InterfaceInfo {
-                interface_id: &IID_FIRST,
-                offset: 0,
-            },
-            InterfaceInfo {
-                interface_id: &IID_SECOND,
-                offset: 8,
-            },
-        ];
-        let ti = TypeInfo::new(1, "Test", &INTERFACES);
-
-        let obj: [u8; 24] = [0; 24];
-        let obj_ptr = obj.as_ptr() as *const c_void;
-
-        unsafe {
-            let result = ti.cast_to(obj_ptr, first_id());
-            assert_eq!(result, obj_ptr); // Offset 0, same pointer
+    pub fn new(value: T, class: &'c RttiClass<T>) -> Self {
+        Self {
+            owner: OwnedObject::with_headers(class.vtables(), value),
+            class: PhantomData,
         }
     }
 
-    #[test]
-    fn test_cast_to_secondary_interface() {
-        static INTERFACES: [InterfaceInfo; 2] = [
-            InterfaceInfo {
-                interface_id: &IID_FIRST,
-                offset: 0,
-            },
-            InterfaceInfo {
-                interface_id: &IID_SECOND,
-                offset: 8,
-            },
-        ];
-        let ti = TypeInfo::new(1, "Test", &INTERFACES);
-
-        let obj: [u8; 24] = [0; 24];
-        let obj_ptr = obj.as_ptr() as *const c_void;
-
-        unsafe {
-            let result = ti.cast_to(obj_ptr, second_id());
-            let expected = (obj_ptr as *const u8).offset(8) as *const c_void;
-            assert_eq!(result, expected);
-        }
+    /// Transfer allocation ownership to a raw pointer.
+    ///
+    /// Reclaim it with [`Self::from_raw`] or [`OwnedObject::from_raw`] while the class
+    /// is still alive.
+    #[must_use]
+    pub fn into_raw(self) -> *mut Object<T> {
+        self.owner.into_raw()
     }
 
-    #[test]
-    fn test_cast_to_unknown_returns_null() {
-        static INTERFACES: [InterfaceInfo; 2] = [
-            InterfaceInfo {
-                interface_id: &IID_FIRST,
-                offset: 0,
-            },
-            InterfaceInfo {
-                interface_id: &IID_SECOND,
-                offset: 8,
-            },
-        ];
-        let ti = TypeInfo::new(1, "Test", &INTERFACES);
-
-        let obj: [u8; 24] = [0; 24];
-        let obj_ptr = obj.as_ptr() as *const c_void;
-
-        unsafe {
-            let result = ti.cast_to(obj_ptr, third_id());
-            assert!(result.is_null());
+    /// Reclaim ownership of an object created from `class`.
+    ///
+    /// # Safety
+    ///
+    /// `object` must satisfy [`OwnedObject::from_raw`] and have been created by
+    /// [`Self::new`] with `class`.
+    #[must_use]
+    pub unsafe fn from_raw(object: *mut Object<T>, class: &'c RttiClass<T>) -> Self {
+        let _ = class;
+        Self {
+            // SAFETY: The caller transfers sole ownership of a live allocation.
+            owner: unsafe { OwnedObject::from_raw(object) },
+            class: PhantomData,
         }
     }
+}
 
-    #[test]
-    fn test_cast_to_empty_interfaces_returns_null() {
-        static INTERFACES: [InterfaceInfo; 0] = [];
-        let ti = TypeInfo::new(1, "Empty", &INTERFACES);
+impl<T: Implement> Deref for RttiObject<'_, T> {
+    type Target = OwnedObject<T>;
 
-        let obj: [u8; 24] = [0; 24];
-        let obj_ptr = obj.as_ptr() as *const c_void;
-
-        unsafe {
-            let result = ti.cast_to(obj_ptr, first_id());
-            assert!(result.is_null());
-        }
+    fn deref(&self) -> &OwnedObject<T> {
+        &self.owner
     }
+}
 
-    #[test]
-    fn test_type_info_debug() {
-        static INTERFACES: [InterfaceInfo; 0] = [];
-        let ti = TypeInfo::new(99, "DebugTest", &INTERFACES);
-        let debug_str = format!("{:?}", ti);
-        assert!(debug_str.contains("TypeInfo"));
-        assert!(debug_str.contains("DebugTest"));
-        assert!(debug_str.contains("99"));
-    }
-
-    #[test]
-    fn test_vtable_with_rtti_layout() {
-        #[repr(C)]
-        struct FakeVTable {
-            method1: fn(),
-            method2: fn(),
-        }
-
-        fn dummy() {}
-
-        static INTERFACES: [InterfaceInfo; 0] = [];
-        static TYPE_INFO: TypeInfo = TypeInfo::new(1, "Fake", &INTERFACES);
-
-        let vtable = VTableWithRtti::new(
-            &TYPE_INFO,
-            FakeVTable {
-                method1: dummy,
-                method2: dummy,
-            },
-        );
-
-        // The vtable_ptr should point to methods, not rtti
-        let ptr = vtable.vtable_ptr();
-        assert!(!ptr.is_null());
-
-        // RTTI should be at negative offset from methods
-        unsafe {
-            let rtti_ptr = (ptr as *const *const TypeInfo).offset(-1);
-            let rtti = &**rtti_ptr;
-            assert_eq!(rtti.type_name, "Fake");
-        }
-    }
-
-    #[test]
-    fn test_interface_ids_are_unique() {
-        // Each static has a unique address
-        assert!(!std::ptr::eq(first_id(), second_id()));
-        assert!(!std::ptr::eq(second_id(), third_id()));
-        assert!(!std::ptr::eq(first_id(), third_id()));
+impl<T: Implement> fmt::Debug for RttiObject<'_, T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("RttiObject")
+            .field(&self.owner)
+            .finish()
     }
 }

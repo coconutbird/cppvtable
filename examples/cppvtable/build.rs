@@ -1,4 +1,7 @@
+//! Compiles the example's inline C++ code.
+
 fn main() {
     // Build inline C++ code from the example binary.
-    cpp_build::build("src/main.rs");
+    println!("cargo:rerun-if-changed=src/main.rs");
+    cpp_build::Config::new().build("src/main.rs");
 }

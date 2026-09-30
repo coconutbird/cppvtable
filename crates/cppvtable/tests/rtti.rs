@@ -1,95 +1,188 @@
-//! Tests for RTTI (Runtime Type Information) system
+//! RTTI class validation and header installation, using synthetic native metadata.
+//!
+//! The synthetic descriptors are only compared by address and never dereferenced;
+//! nothing here hands an object to native RTTI operations.
 
-use cppvtable::rtti::{InterfaceInfo, TypeInfo, VTableWithRtti};
-use std::ffi::c_void;
+use core::ffi::c_void;
+use core::ptr;
 
-// Define interface IDs using static addresses (pointer-based for const-compatibility)
-static IID_ISWIMMER: u8 = 0;
-static IID_IFLYER: u8 = 0;
-static IID_100: u8 = 0;
-static IID_200: u8 = 0;
+use cppvtable::rtti::{
+    CppAbi, ItaniumPrefix, MsvcAbsoluteLocator, MsvcPrefix, RttiClass, RttiError, RttiMetadata,
+    RttiObject, RttiVariant,
+};
+use cppvtable::{Object, OwnedObject, implement, interface};
+use cppvtable_abi::interface::vtable_of;
 
-#[test]
-fn test_type_info_creation() {
-    let type_info = TypeInfo::new(0x12345678, "Duck", &[]);
+#[interface(abi = c)]
+unsafe trait IPlain {
+    fn plain(&self) -> u32;
+}
 
-    assert_eq!(type_info.type_id, 0x12345678);
-    assert_eq!(type_info.type_name, "Duck");
+#[interface(abi = cpp)]
+unsafe trait IValue {
+    fn value(&self) -> u32;
+}
+
+#[implement(IPlain, IValue)]
+struct Mixed {
+    value: u32,
+}
+
+impl IPlainImpl for Mixed {
+    fn plain(&self) -> u32 {
+        self.value
+    }
+}
+
+impl IValueImpl for Mixed {
+    fn value(&self) -> u32 {
+        self.value + 1
+    }
+}
+
+#[implement(IValue)]
+struct Single {
+    value: u32,
+}
+
+impl IValueImpl for Single {
+    fn value(&self) -> u32 {
+        self.value
+    }
+}
+
+/// Stand-ins for native type descriptors; only their addresses are used.
+static DESCRIPTOR: [usize; 4] = [0; 4];
+static HIERARCHY: [u32; 4] = [0; 4];
+#[cfg(target_env = "msvc")]
+static VIRTUAL_HIERARCHY: [u32; 4] = [0, 2, 0, 0];
+
+fn descriptor() -> *const c_void {
+    ptr::from_ref(&DESCRIPTOR).cast()
+}
+
+fn locator(offset: usize, construction: u32, hierarchy: &'static [u32; 4]) -> MsvcAbsoluteLocator {
+    MsvcAbsoluteLocator {
+        signature: 0,
+        offset: offset.try_into().unwrap(),
+        construction_displacement: construction,
+        type_descriptor: descriptor(),
+        class_descriptor: ptr::from_ref(hierarchy).cast(),
+    }
+}
+
+/// # Safety
+/// `locator` must outlive every use of the returned metadata.
+unsafe fn msvc(locator: &MsvcAbsoluteLocator) -> RttiMetadata {
+    let prefix = MsvcPrefix {
+        locator: ptr::from_ref(locator).cast(),
+    };
+    // SAFETY: The caller keeps the locator alive; its descriptors are never read.
+    unsafe { RttiMetadata::from_msvc_prefix_variant(RttiVariant::MsvcAbsolute, prefix) }
+}
+
+fn itanium(offset: usize) -> RttiMetadata {
+    let prefix = ItaniumPrefix {
+        offset_to_top: -isize::try_from(offset).unwrap(),
+        type_info: descriptor(),
+    };
+    // SAFETY: The descriptor address is only compared, never dereferenced.
+    unsafe { RttiMetadata::from_itanium_prefix_variant(RttiVariant::ItaniumPointer, prefix) }
+}
+
+/// Metadata for `abi`, reading `locator` only when it is Microsoft.
+///
+/// # Safety
+/// `locator` must outlive every use of the returned metadata.
+unsafe fn metadata_for(abi: CppAbi, offset: usize, locator: &MsvcAbsoluteLocator) -> RttiMetadata {
+    match abi {
+        // SAFETY: Guaranteed by the caller.
+        CppAbi::Msvc => unsafe { msvc(locator) },
+        CppAbi::Itanium => itanium(offset),
+    }
 }
 
 #[test]
-fn test_interface_info_size() {
-    // InterfaceInfo should be 2 * pointer size
-    let size = std::mem::size_of::<InterfaceInfo>();
-    #[cfg(target_pointer_width = "64")]
-    assert_eq!(size, 16);
-    #[cfg(target_pointer_width = "32")]
-    assert_eq!(size, 8);
+fn mixed_c_and_cpp_interfaces_install_rtti_only_on_the_cpp_header() {
+    let offset = Object::<Mixed>::slot_offset(1);
+    let msvc_locator = locator(offset, 0, &HIERARCHY);
+    // SAFETY: The locator outlives the class and every object below.
+    let metadata = unsafe { metadata_for(CppAbi::TARGET, offset, &msvc_locator) };
+    // SAFETY: Synthetic metadata matches the Rust layout; no native code uses RTTI.
+    let class = unsafe {
+        RttiClass::<Mixed>::builder()
+            .with::<IValue>(metadata)
+            .build()
+    }
+    .unwrap();
+    let object = RttiObject::new(Mixed { value: 5 }, &class);
+    let plain = OwnedObject::new(Mixed { value: 0 });
+
+    assert_eq!(object.interface::<IPlain>().plain(), 5);
+    assert_eq!(object.interface::<IValue>().value(), 6);
+    assert!(ptr::eq(
+        vtable_of(&*object.interface::<IPlain>()),
+        vtable_of(&*plain.interface::<IPlain>())
+    ));
+    assert!(!ptr::eq(
+        vtable_of(&*object.interface::<IValue>()),
+        vtable_of(&*plain.interface::<IValue>())
+    ));
+
+    let value = object.as_raw::<IValue>();
+    // SAFETY: The installed prefix copies the synthetic metadata above.
+    let installed = unsafe { RttiMetadata::from_interface_variant(metadata.variant(), value) };
+    assert_eq!(installed.type_info(), descriptor());
+    assert_eq!(installed.offset_to_top(), -isize::try_from(offset).unwrap());
+    // SAFETY: `value` is a live interface described by the installed metadata.
+    let complete = unsafe { installed.complete_object(value) };
+    assert_eq!(complete, object.as_raw::<IPlain>());
 }
 
 #[test]
-fn test_interface_info_const_creation() {
-    // Test that InterfaceInfo can be created in const context
-    const INFO: InterfaceInfo = InterfaceInfo::new(&IID_ISWIMMER as *const u8, 0);
-    assert_eq!(INFO.offset, 0);
+fn a_cpp_interface_without_metadata_is_rejected() {
+    // SAFETY: Rejected before any table is built.
+    let result = unsafe { RttiClass::<Mixed>::builder().build() };
+    assert!(matches!(result, Err(RttiError::InterfaceKind)));
 }
 
 #[test]
-fn test_type_info_implements() {
-    // Leak to get 'static lifetime for test
-    let interfaces: &'static [InterfaceInfo] = Box::leak(Box::new([
-        InterfaceInfo::new(&IID_100 as *const u8, 0),
-        InterfaceInfo::new(&IID_200 as *const u8, 8),
-    ]));
-
-    let type_info = TypeInfo::new(1, "TestType", interfaces);
-
-    assert!(type_info.implements(&IID_100 as *const u8));
-    assert!(type_info.implements(&IID_200 as *const u8));
-    assert!(!type_info.implements(&IID_ISWIMMER as *const u8)); // Different static
+fn metadata_from_the_other_cpp_abi_is_rejected() {
+    let msvc_locator = locator(0, 0, &HIERARCHY);
+    let other = match CppAbi::TARGET {
+        CppAbi::Msvc => CppAbi::Itanium,
+        CppAbi::Itanium => CppAbi::Msvc,
+    };
+    // SAFETY: The locator outlives the metadata.
+    let foreign = unsafe { metadata_for(other, 0, &msvc_locator) };
+    // SAFETY: Rejected before any table is built.
+    let result = unsafe {
+        RttiClass::<Single>::builder()
+            .with::<IValue>(foreign)
+            .build()
+    };
+    assert!(matches!(result, Err(RttiError::AbiMismatch)));
 }
 
+#[cfg(target_env = "msvc")]
 #[test]
-fn test_cast_to() {
-    let interfaces: &'static [InterfaceInfo] = Box::leak(Box::new([
-        InterfaceInfo::new(&IID_100 as *const u8, 0),
-        InterfaceInfo::new(&IID_200 as *const u8, 8),
-    ]));
-
-    let type_info = TypeInfo::new(1, "TestType", interfaces);
-
-    // Create a dummy object
-    let dummy = [0u8; 32];
-    let object_ptr = dummy.as_ptr() as *const c_void;
-
+fn microsoft_construction_and_virtual_inheritance_metadata_is_rejected() {
+    let construction = locator(0, 4, &HIERARCHY);
+    let virtual_base = locator(0, 0, &VIRTUAL_HIERARCHY);
+    // SAFETY: The locators and hierarchy flags outlive the metadata. Both
+    // mismatches are rejected before any table is built.
     unsafe {
-        // Cast to interface at offset 0
-        let ptr1 = type_info.cast_to(object_ptr, &IID_100 as *const u8);
-        assert_eq!(ptr1, object_ptr);
-
-        // Cast to interface at offset 8
-        let ptr2 = type_info.cast_to(object_ptr, &IID_200 as *const u8);
-        assert_eq!(ptr2, (object_ptr as *const u8).offset(8) as *const c_void);
-
-        // Cast to non-existent interface returns null
-        let ptr3 = type_info.cast_to(object_ptr, &IID_IFLYER as *const u8);
-        assert!(ptr3.is_null());
+        assert!(matches!(
+            RttiClass::<Single>::builder()
+                .with::<IValue>(msvc(&construction))
+                .build(),
+            Err(RttiError::ConstructionTable)
+        ));
+        assert!(matches!(
+            RttiClass::<Single>::builder()
+                .with::<IValue>(msvc(&virtual_base))
+                .build(),
+            Err(RttiError::VirtualInheritance)
+        ));
     }
-}
-
-#[test]
-fn test_vtable_with_rtti_layout() {
-    // Test VTableWithRtti memory layout
-    #[repr(C)]
-    struct TestVTable {
-        method1: extern "C" fn(),
-        method2: extern "C" fn(),
-    }
-
-    // VTableWithRtti should have RTTI pointer first, then methods
-    let size = std::mem::size_of::<VTableWithRtti<TestVTable>>();
-    let ptr_size = std::mem::size_of::<*const TypeInfo>();
-    let vtable_size = std::mem::size_of::<TestVTable>();
-
-    assert_eq!(size, ptr_size + vtable_size);
 }
