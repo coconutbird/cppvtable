@@ -3,8 +3,9 @@
 //! This module borrows native type descriptors and hierarchy information. It does not
 //! invent C++ type identities or require linking a C++ runtime. Runtime cast functions
 //! can be supplied explicitly when casts beyond complete-object recovery are needed.
-//! Extracted layout, hierarchy, and raw-name fields must remain immutable and loaded
-//! for the rest of the process. Independent native demangling caches are never read.
+//! Extracted layout, hierarchy, and raw-name fields are treated like C++ `type_info`:
+//! static storage that stays loaded while in use. Module unloading is not modeled.
+//! Independent native demangling caches are never read.
 //!
 //! The pointer-based Itanium layout follows the
 //! [Itanium C++ ABI](https://itanium-cxx-abi.github.io/cxx-abi/abi.html#rtti).
@@ -139,11 +140,12 @@ enum Prefix {
 
 /// A copyable view of immutable native RTTI metadata.
 ///
-/// This view outlives the object used to extract it, because its unsafe constructors
-/// require the native descriptors and their names to remain loaded permanently. It
-/// does not own the source object or any callback table. Reusing the metadata for a
-/// Rust object additionally requires the native hierarchy and Rust object layout to
-/// agree; extraction alone does not establish that contract.
+/// This view outlives the object used to extract it. Like C++ `type_info`, the native
+/// descriptors and names must stay loaded while the view, or anything built from it,
+/// is in use; unloading is not modeled. It does not own the source object or any
+/// callback table. Reusing the metadata for a Rust object additionally requires the
+/// native hierarchy and Rust object layout to agree; extraction alone does not
+/// establish that contract.
 /// Independent native demangling-cache fields may change; this view never reads them.
 #[derive(Clone, Copy, Debug)]
 pub struct RttiMetadata {
@@ -152,7 +154,7 @@ pub struct RttiMetadata {
 }
 
 // SAFETY: Constructors require all referenced metadata and names to be immutable and
-// permanently loaded. Reading or copying this metadata does not access object state.
+// loaded while in use. Reading or copying this metadata does not access object state.
 unsafe impl Send for RttiMetadata {}
 // SAFETY: See the immutable-metadata contract of Send.
 unsafe impl Sync for RttiMetadata {}
@@ -170,7 +172,7 @@ impl RttiMetadata {
     /// `object` must be a live, fully constructed polymorphic interface of `abi`, with
     /// RTTI enabled and the ordinary pointer-based vtable representation. It must not
     /// be in construction or destruction. Its RTTI descriptors and terminated names
-    /// must be immutable, valid, and loaded for the rest of the process. This includes
+    /// must be immutable, valid, and loaded while the metadata is in use. This includes
     /// every image-relative Microsoft descriptor referenced by the locator.
     /// All object, descriptor, and function pointers must be unsigned; authenticated
     /// representations such as arm64e require a native adapter instead.
@@ -193,7 +195,7 @@ impl RttiMetadata {
     /// # Safety
     ///
     /// The live fully constructed interface must use `variant`, and its metadata
-    /// must satisfy the permanent lifetime contract of [`Self::from_interface`].
+    /// must satisfy the lifetime contract of [`Self::from_interface`].
     /// The interface's first field must be its vtable address-point pointer.
     ///
     /// # Panics
@@ -215,7 +217,7 @@ impl RttiMetadata {
     ///
     /// `table` must address a valid complete-object vtable with the RTTI prefix for
     /// `abi`; it must not be a constructor/destructor table or a relative Itanium
-    /// table. The descriptors and terminated names must obey the immutable, permanent
+    /// table. The descriptors and terminated names must obey the immutable, loaded
     /// lifetime contract of [`Self::from_interface`].
     /// Its pointers must be unsigned rather than requiring authentication.
     ///
@@ -246,7 +248,7 @@ impl RttiMetadata {
     /// `table` must be a complete-object address point using `variant`. Its prefix
     /// and any relative proxy must be readable and immutable during extraction.
     /// Referenced descriptors and raw-name fields must remain valid, immutable, and
-    /// loaded permanently. For Microsoft metadata this includes the locator itself,
+    /// loaded while in use. For Microsoft metadata this includes the locator itself,
     /// whose pointer is retained. Relative32 requires ordinary untagged type names;
     /// combining relative tables with Apple arm64 tagged names is not supported.
     /// Construction and destruction tables are excluded.
@@ -282,7 +284,7 @@ impl RttiMetadata {
     /// # Safety
     ///
     /// `prefix.type_info` must address valid native class RTTI, with all descriptors
-    /// and terminated names immutable and loaded for the rest of the process.
+    /// and terminated names immutable and loaded while the metadata is in use.
     /// The offset must correspond to a complete-object interface address point.
     ///
     /// # Panics
@@ -330,7 +332,7 @@ impl RttiMetadata {
     /// `address_point` and `prefix` must describe the same valid complete-object
     /// relative table. The pointer-sized proxy must be readable and immutable during
     /// extraction. Referenced native RTTI and raw-name fields must remain immutable
-    /// and loaded permanently. Type-name pointers must use ordinary untagged Itanium
+    /// and loaded while in use. Type-name pointers must use ordinary untagged Itanium
     /// encoding; combining relative tables with Apple arm64 tagged names is unsupported.
     ///
     /// # Panics
@@ -367,10 +369,9 @@ impl RttiMetadata {
     /// # Safety
     ///
     /// The locator, descriptors, and terminated names must be valid for the target's
-    /// Microsoft ABI, immutable, and loaded for the rest of the process. Revision zero
-    /// selects native absolute pointers; revision one selects image-relative fields.
-    /// The locator must describe a complete-object interface, with representable
-    /// object offsets.
+    /// Microsoft ABI, immutable, and loaded while in use. Revision zero selects native
+    /// absolute pointers; revision one selects image-relative fields. The locator must
+    /// describe a complete-object interface, with representable object offsets.
     ///
     /// # Panics
     ///
@@ -730,11 +731,67 @@ impl DynamicCastRuntime {
 #[cfg(test)]
 mod tests {
     use super::{
-        ItaniumPrefix, ItaniumRelativePrefix, MsvcAbsoluteLocator, MsvcPrefix, MsvcRelativeLocator,
-        RttiVariant, decode_name_pointer,
+        CppAbi, ItaniumPrefix, ItaniumRelativePrefix, MsvcAbsoluteLocator, MsvcPrefix,
+        MsvcRelativeLocator, RttiMetadata, RttiVariant, decode_name_pointer,
     };
-    use core::ffi::CStr;
+    use core::ffi::{CStr, c_void};
     use core::mem::{offset_of, size_of};
+
+    fn absolute_locator(signature: u32) -> MsvcAbsoluteLocator {
+        MsvcAbsoluteLocator {
+            signature,
+            offset: 0,
+            construction_displacement: 0,
+            type_descriptor: core::ptr::from_ref(&0usize).cast(),
+            class_descriptor: core::ptr::null(),
+        }
+    }
+
+    fn prefix(locator: &MsvcAbsoluteLocator) -> MsvcPrefix {
+        MsvcPrefix {
+            locator: core::ptr::from_ref(locator).cast(),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "unsupported Microsoft RTTI locator revision")]
+    fn an_unknown_microsoft_locator_revision_is_rejected() {
+        let locator = absolute_locator(7);
+        // SAFETY: Only the revision is read before the panic.
+        let _ = unsafe { RttiMetadata::from_msvc_prefix(prefix(&locator)) };
+    }
+
+    #[test]
+    #[should_panic(expected = "requires a revision-one locator")]
+    fn an_explicit_microsoft_variant_must_match_the_locator_revision() {
+        let locator = absolute_locator(0);
+        // SAFETY: Only the revision is read before the panic.
+        let _ = unsafe {
+            RttiMetadata::from_msvc_prefix_variant(RttiVariant::MsvcImageRelative, prefix(&locator))
+        };
+    }
+
+    #[test]
+    #[should_panic(expected = "expected pointer-sized Itanium RTTI")]
+    fn relative_itanium_metadata_needs_its_address_point() {
+        let prefix = ItaniumPrefix {
+            offset_to_top: 0,
+            type_info: core::ptr::from_ref(&0usize).cast(),
+        };
+        // SAFETY: Rejected before the descriptor is used.
+        let _ = unsafe {
+            RttiMetadata::from_itanium_prefix_variant(RttiVariant::ItaniumRelative32, prefix)
+        };
+    }
+
+    #[test]
+    #[should_panic(expected = "non-null polymorphic interface")]
+    fn a_null_interface_is_rejected() {
+        // SAFETY: Rejected before reading.
+        let _ = unsafe {
+            RttiMetadata::from_interface(CppAbi::Itanium, core::ptr::null_mut::<c_void>())
+        };
+    }
 
     #[test]
     fn rtti_prefixes_use_the_native_address_point_layout() {

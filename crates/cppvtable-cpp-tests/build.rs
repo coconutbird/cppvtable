@@ -9,6 +9,9 @@ fn main() {
         "src/rtti.rs",
         "src/rtti/smoke.rs",
         "src/rtti/foreign.rs",
+        "src/rtti/hook.rs",
+        "src/rtti/relative.rs",
+        "src/rtti/relative.cpp",
         "src/inheritance.rs",
         "src/c_table.rs",
         "src/conventions.rs",
@@ -16,8 +19,6 @@ fn main() {
         "src/inline.c",
         "src/inline.rs",
         "src/com.rs",
-        "src/rtti_relative.cpp",
-        "src/rtti_relative.rs",
     ] {
         println!("cargo:rerun-if-changed={source}");
     }
@@ -46,7 +47,7 @@ fn main() {
     );
     if has_relative {
         relative
-            .file("src/rtti_relative.cpp")
+            .file("src/rtti/relative.cpp")
             .flag("-fexperimental-relative-c++-abi-vtables")
             .compile("cppvtable_relative_fixture");
         println!("cargo:rustc-cfg=has_relative_vtables");

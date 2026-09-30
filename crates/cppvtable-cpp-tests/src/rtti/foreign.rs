@@ -1,54 +1,56 @@
 //! Native inheritance access rules and leaf/single-inheritance RTTI kinds.
 
 use super::*;
-use cppvtable::rtti::{CppAbi, RttiMetadata};
-use cppvtable::{OwnedObject, implement, interface};
-
-const ABI: CppAbi = if cfg!(target_env = "msvc") {
-    CppAbi::Msvc
-} else {
-    CppAbi::Itanium
-};
+use cppvtable::rtti::{RttiClass, RttiMetadata, RttiObject};
+use cppvtable::{implement, interface};
 
 #[test]
 fn foreign_virtual_ambiguous_and_private_bases_follow_native_cast_rules() {
-    let runtime = super::smoke::runtime();
-    for (kind, descriptor) in [(2, 6), (3, 9), (4, 5)] {
-        let native = create_native(kind);
+    let runtime = runtime();
+    for class in [
+        Class::VirtualWitness,
+        Class::AmbiguousWitness,
+        Class::PrivateWitness,
+    ] {
+        let native = create_native(class);
         // SAFETY: The exact factory class is fully constructed and remains alive;
         // its compiler-produced hierarchy and native runtime match these descriptors.
         unsafe {
             let root = RttiMetadata::from_interface(ABI, native.root);
             let side = RttiMetadata::from_interface(ABI, native.secondary);
-            assert_eq!(root.type_info(), type_descriptor(descriptor));
+            assert_eq!(root.type_info(), type_descriptor(class));
             assert_eq!(side.type_info(), root.type_info());
             assert_eq!(root.complete_object(native.root), native.complete);
             assert_eq!(side.complete_object(native.secondary), native.complete);
             assert_eq!(
                 runtime.cast(
                     native.secondary,
-                    type_descriptor(2),
-                    type_descriptor(descriptor)
+                    type_descriptor(Class::Secondary),
+                    type_descriptor(class)
                 ),
                 native.complete
             );
-            let root_from_side =
-                runtime.cast(native.secondary, type_descriptor(2), type_descriptor(0));
-            let complete_from_root =
-                runtime.cast(native.root, type_descriptor(0), type_descriptor(descriptor));
-            if kind == 2 {
-                assert_eq!(root_from_side, native.root);
-            } else {
+            let root_from_side = runtime.cast(
+                native.secondary,
+                type_descriptor(Class::Secondary),
+                type_descriptor(Class::Root),
+            );
+            let complete_from_root = runtime.cast(
+                native.root,
+                type_descriptor(Class::Root),
+                type_descriptor(class),
+            );
+            match class {
+                Class::VirtualWitness => assert_eq!(root_from_side, native.root),
                 // The target base is ambiguous or private, as encoded by native RTTI.
-                assert!(root_from_side.is_null());
+                _ => assert!(root_from_side.is_null()),
             }
-            if kind == 4 {
-                assert!(complete_from_root.is_null());
-            } else {
-                assert_eq!(complete_from_root, native.complete);
+            match class {
+                Class::PrivateWitness => assert!(complete_from_root.is_null()),
+                _ => assert_eq!(complete_from_root, native.complete),
             }
-            delete_native(native.complete, kind);
             assert!(!root.mangled_name().is_empty());
+            delete_native(native.complete, class);
         }
     }
 }
@@ -70,11 +72,11 @@ unsafe fn reference_casts(root: *mut c_void) -> bool {
 
 #[test]
 fn native_reference_cast_failure_is_caught_before_returning_to_rust() {
-    let native = create_native(0);
+    let native = create_native(Class::Witness);
     // SAFETY: The matching native object remains alive; all C++ exceptions are caught.
     unsafe {
         assert!(reference_casts(native.root));
-        delete_native(native.complete, 0);
+        delete_native(native.complete, Class::Witness);
     }
 }
 
@@ -112,12 +114,12 @@ impl ISingleImpl for Single {
     }
 }
 
-fn metadata_for(kind: u32) -> RttiMetadata {
-    let native = create_native(kind);
-    // SAFETY: Capture permanent native descriptors before releasing the concrete instance.
+fn metadata_for(class: Class) -> RttiMetadata {
+    let native = create_native(class);
+    // SAFETY: Capture static native descriptors before releasing the concrete instance.
     unsafe {
         let metadata = RttiMetadata::from_interface(ABI, native.root);
-        delete_native(native.complete, kind);
+        delete_native(native.complete, class);
         metadata
     }
 }
@@ -138,17 +140,23 @@ unsafe fn leaf_checks(object: *mut c_void, single: bool, value: i32) -> bool {
 
 #[test]
 fn leaf_and_single_inheritance_type_descriptors_work_for_rust_objects() {
-    let leaf = metadata_for(5);
-    let single = metadata_for(6);
-    assert_eq!(leaf.type_info(), type_descriptor(7));
-    assert_eq!(single.type_info(), type_descriptor(8));
+    let leaf_metadata = metadata_for(Class::Leaf);
+    let single_metadata = metadata_for(Class::Single);
+    assert_eq!(leaf_metadata.type_info(), type_descriptor(Class::Leaf));
+    assert_eq!(single_metadata.type_info(), type_descriptor(Class::Single));
     // SAFETY: Each matching native class is a single nonvirtual interface chain at
-    // offset zero. Callbacks remain virtual and the native metadata is permanent.
+    // offset zero. Callbacks remain virtual and the native metadata stays loaded.
+    let (leaf_class, single_class) = unsafe {
+        (
+            RttiClass::<Leaf>::new(&[Some(leaf_metadata)]).unwrap(),
+            RttiClass::<Single>::new(&[Some(single_metadata)]).unwrap(),
+        )
+    };
+    let leaf = RttiObject::new(Leaf { value: 101 }, &leaf_class);
+    let single = RttiObject::new(Single { value: 201 }, &single_class);
+    // SAFETY: Both objects are live and built from their matching native classes.
     unsafe {
-        let leaf_owner = OwnedObject::new_with_rtti(Leaf { value: 101 }, &[Some(leaf)]).unwrap();
-        let single_owner =
-            OwnedObject::new_with_rtti(Single { value: 201 }, &[Some(single)]).unwrap();
-        assert!(leaf_checks(leaf_owner.as_raw::<ILeaf>(), false, 101));
-        assert!(leaf_checks(single_owner.as_raw::<ISingle>(), true, 201));
+        assert!(leaf_checks(leaf.as_raw::<ILeaf>(), false, 101));
+        assert!(leaf_checks(single.as_raw::<ISingle>(), true, 201));
     }
 }

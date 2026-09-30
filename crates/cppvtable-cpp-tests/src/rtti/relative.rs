@@ -1,8 +1,8 @@
 //! Native Clang relative32 RTTI and explicit relative callback resolution.
 
 use core::ffi::c_void;
-use cppvtable::rtti::{RttiMetadata, RttiVariant, relative_function};
-use cppvtable::{OwnedObject, implement, interface};
+use cppvtable::rtti::{RttiClass, RttiError, RttiMetadata, RttiVariant, relative_function};
+use cppvtable::{implement, interface};
 
 unsafe extern "C" {
     fn cppvtable_relative_primary() -> *mut c_void;
@@ -89,7 +89,7 @@ impl ISideImpl for Implementation {
 
 #[test]
 fn relative_metadata_cannot_silently_prefix_absolute_callback_tables() {
-    // SAFETY: Valid permanent native metadata; this checked representation mismatch
+    // SAFETY: Valid static native metadata; this checked representation mismatch
     // is explicitly permitted by the constructor and must fail before installation.
     unsafe {
         let metadata = [
@@ -103,8 +103,8 @@ fn relative_metadata_cannot_silently_prefix_absolute_callback_tables() {
             )),
         ];
         assert!(matches!(
-            OwnedObject::new_with_rtti(Implementation, &metadata),
-            Err(cppvtable::rtti::RttiError::UnsupportedVariant)
+            RttiClass::<Implementation>::new(&metadata),
+            Err(RttiError::UnsupportedVariant)
         ));
     }
 }

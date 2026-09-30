@@ -6,7 +6,67 @@ use std::ffi::c_void;
 #[cfg(test)]
 mod foreign;
 #[cfg(test)]
+mod hook;
+#[cfg(all(test, has_relative_vtables))]
+mod relative;
+#[cfg(test)]
 mod smoke;
+
+/// C++ fixture classes; the discriminants select the matching C++ `switch` cases.
+#[derive(Clone, Copy, Debug)]
+#[repr(u32)]
+enum Class {
+    Root = 0,
+    Secondary = 2,
+    Unrelated = 3,
+    Witness = 4,
+    OtherWitness = 5,
+    VirtualWitness = 6,
+    AmbiguousWitness = 7,
+    PrivateWitness = 8,
+    Leaf = 9,
+    Single = 10,
+}
+
+#[cfg(test)]
+const ABI: cppvtable::rtti::CppAbi = if cfg!(target_env = "msvc") {
+    cppvtable::rtti::CppAbi::Msvc
+} else {
+    cppvtable::rtti::CppAbi::Itanium
+};
+
+#[cfg(all(test, target_env = "msvc"))]
+unsafe extern "C" {
+    fn cppvtable_rtti_runtime_msvc(
+        object: *mut c_void,
+        delta: i32,
+        source: *const c_void,
+        target: *const c_void,
+        reference: i32,
+    ) -> *mut c_void;
+}
+#[cfg(all(test, not(target_env = "msvc")))]
+unsafe extern "C" {
+    fn cppvtable_rtti_runtime_itanium(
+        object: *const c_void,
+        source: *const c_void,
+        target: *const c_void,
+        hint: isize,
+    ) -> *mut c_void;
+}
+
+/// The native runtime's pointer `dynamic_cast` entry point.
+#[cfg(test)]
+fn runtime() -> cppvtable::rtti::DynamicCastRuntime {
+    #[cfg(target_env = "msvc")]
+    {
+        cppvtable::rtti::DynamicCastRuntime::Msvc(cppvtable_rtti_runtime_msvc)
+    }
+    #[cfg(not(target_env = "msvc"))]
+    {
+        cppvtable::rtti::DynamicCastRuntime::Itanium(cppvtable_rtti_runtime_itanium)
+    }
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -108,71 +168,78 @@ cpp! {{
     #endif
 }}
 
-fn create_native(kind: u32) -> NativeObject {
-    cpp!(unsafe [kind as "std::uint32_t"] -> NativeObject as "CppvtableRttiPointers" {
+/// Construct a concrete fixture class; release it with [`delete_native`].
+fn create_native(class: Class) -> NativeObject {
+    let kind = class as u32;
+    let native = cpp!(unsafe [kind as "std::uint32_t"] -> NativeObject as "CppvtableRttiPointers" {
         switch (kind) {
-        case 0: {
+        case 4: {
             auto* object = new CppvtableRttiWitness;
             return {object, static_cast<CppvtableRttiDerived*>(object), static_cast<CppvtableRttiSecondary*>(object)};
         }
-        case 1: {
+        case 5: {
             auto* object = new CppvtableRttiOtherWitness;
             return {object, static_cast<CppvtableRttiDerived*>(object), static_cast<CppvtableRttiSecondary*>(object)};
         }
-        case 2: {
+        case 6: {
             auto* object = new CppvtableRttiVirtualWitness;
             return {object, static_cast<CppvtableRttiRoot*>(object), static_cast<CppvtableRttiSecondary*>(object)};
         }
-        case 3: {
+        case 7: {
             auto* object = new CppvtableRttiAmbiguousWitness;
             return {object, static_cast<CppvtableRttiRoot*>(static_cast<CppvtableRttiLeft*>(object)), static_cast<CppvtableRttiSecondary*>(object)};
         }
-        case 4: {
+        case 8: {
             auto* object = new CppvtableRttiPrivateWitness;
             return {object, object->private_root(), static_cast<CppvtableRttiSecondary*>(object)};
         }
-        case 5: {
+        case 9: {
             auto* object = new CppvtableRttiLeaf;
             return {object, object, nullptr};
         }
-        case 6: {
+        case 10: {
             auto* object = new CppvtableRttiSingle;
             return {object, static_cast<CppvtableRttiLeaf*>(object), nullptr};
         }
         default: return {nullptr, nullptr, nullptr};
         }
-    })
+    });
+    assert!(!native.complete.is_null(), "{class:?} is abstract");
+    native
 }
 
 /// # Safety
-/// `object` must be the uniquely owned complete allocation from the factory for `kind`.
-unsafe fn delete_native(object: *mut c_void, kind: u32) {
+/// `object` must be the uniquely owned complete allocation from the factory for `class`.
+unsafe fn delete_native(object: *mut c_void, class: Class) {
+    let kind = class as u32;
     cpp!(unsafe [object as "void*", kind as "std::uint32_t"] {
         switch (kind) {
-        case 0: CppvtableRttiDelete(static_cast<CppvtableRttiWitness*>(object)); break;
-        case 1: CppvtableRttiDelete(static_cast<CppvtableRttiOtherWitness*>(object)); break;
-        case 2: CppvtableRttiDelete(static_cast<CppvtableRttiVirtualWitness*>(object)); break;
-        case 3: CppvtableRttiDelete(static_cast<CppvtableRttiAmbiguousWitness*>(object)); break;
-        case 4: CppvtableRttiDelete(static_cast<CppvtableRttiPrivateWitness*>(object)); break;
-        case 5: CppvtableRttiDelete(static_cast<CppvtableRttiLeaf*>(object)); break;
-        case 6: CppvtableRttiDelete(static_cast<CppvtableRttiSingle*>(object)); break;
+        case 4: CppvtableRttiDelete(static_cast<CppvtableRttiWitness*>(object)); break;
+        case 5: CppvtableRttiDelete(static_cast<CppvtableRttiOtherWitness*>(object)); break;
+        case 6: CppvtableRttiDelete(static_cast<CppvtableRttiVirtualWitness*>(object)); break;
+        case 7: CppvtableRttiDelete(static_cast<CppvtableRttiAmbiguousWitness*>(object)); break;
+        case 8: CppvtableRttiDelete(static_cast<CppvtableRttiPrivateWitness*>(object)); break;
+        case 9: CppvtableRttiDelete(static_cast<CppvtableRttiLeaf*>(object)); break;
+        case 10: CppvtableRttiDelete(static_cast<CppvtableRttiSingle*>(object)); break;
         }
     });
 }
 
-fn type_descriptor(kind: u32) -> *const c_void {
+/// The native `typeid` descriptor of a fixture class.
+fn type_descriptor(class: Class) -> *const c_void {
+    let kind = class as u32;
     cpp!(unsafe [kind as "std::uint32_t"] -> *const c_void as "const void*" {
         switch (kind) {
         case 0: return &typeid(CppvtableRttiRoot);
-        case 1: return &typeid(CppvtableRttiDerived);
         case 2: return &typeid(CppvtableRttiSecondary);
-        case 3: return &typeid(CppvtableRttiWitness);
-        case 4: return &typeid(CppvtableRttiUnrelated);
-        case 5: return &typeid(CppvtableRttiPrivateWitness);
+        case 3: return &typeid(CppvtableRttiUnrelated);
+        case 4: return &typeid(CppvtableRttiWitness);
+        case 5: return &typeid(CppvtableRttiOtherWitness);
         case 6: return &typeid(CppvtableRttiVirtualWitness);
-        case 7: return &typeid(CppvtableRttiLeaf);
-        case 8: return &typeid(CppvtableRttiSingle);
-        case 9: return &typeid(CppvtableRttiAmbiguousWitness);
+        case 7: return &typeid(CppvtableRttiAmbiguousWitness);
+        case 8: return &typeid(CppvtableRttiPrivateWitness);
+        case 9: return &typeid(CppvtableRttiLeaf);
+        case 10: return &typeid(CppvtableRttiSingle);
         default: return nullptr;
         }
     })

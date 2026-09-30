@@ -278,21 +278,34 @@ COM reference-count policies also require target support for 32-bit atomics.
 Procedural macros execute on the build host and do not add a target `std` dependency.
 
 The maintained consumer in `tests/no-std` compiles and exercises generated pointer,
-inline, and COM interfaces. Its CI checks all features on `thumbv7em-none-eabi`:
+inline, and COM interfaces, and type-checks the RTTI and hooking APIs. Its CI checks
+all features on `thumbv7em-none-eabi`:
 
 ```sh
 cargo check -p cppvtable-abi -p cppvtable -p cppvtable-com --all-features --target thumbv7em-none-eabi
-cargo check --manifest-path tests/no-std/Cargo.toml --all-features --target thumbv7em-none-eabi
+cargo build --manifest-path tests/no-std/Cargo.toml --all-features --target thumbv7em-none-eabi
 ```
 
 ## C++ RTTI
 
-RTTI is opt-in for Rust-created objects. Use `OwnedObject::new_with_rtti` to combine
-the generated Rust callbacks with MSVC or Itanium metadata from a matching native
-C++ class. Capture that metadata with
-`cppvtable::rtti::RttiMetadata::from_interface(abi, native_pointer)`, then supply
-one `Some(metadata)` per C++ interface in `#[implement]` order. Independent C
-interfaces use `None`.
+RTTI is opt-in for Rust-created objects. Capture MSVC or Itanium metadata from a
+matching native C++ class with
+`cppvtable::rtti::RttiMetadata::from_interface(abi, native_pointer)`, then build an
+`RttiClass<T>` once, supplying one `Some(metadata)` per C++ interface in
+`#[implement]` order. Independent C interfaces use `None`. `RttiObject::new(value,
+&class)` allocates objects whose headers point at the class's shared, prefixed
+callback tables, so each object costs the same as `OwnedObject::new`:
+
+```rust,ignore
+// SAFETY: `metadata` describes a native class matching `Widget`'s interfaces.
+let class = unsafe { RttiClass::<Widget>::new(&[Some(metadata)]) }?;
+let first = RttiObject::new(Widget::default(), &class);
+let second = RttiObject::new(Widget::default(), &class);
+```
+
+Each `RttiObject` borrows its class, so the class cannot be dropped while objects
+exist. It dereferences to `OwnedObject<T>`; `into_raw` and `RttiObject::from_raw`
+transfer ownership, and the caller keeps the class alive meanwhile.
 
 ABI families and RTTI representations are separate. Use
 `RttiMetadata::from_interface_variant` for an explicit `RttiVariant`:
@@ -308,9 +321,9 @@ ABI families and RTTI representations are separate. Use
 The MSVC convenience constructor reads the locator revision. The Itanium convenience
 constructor selects the ordinary target-default pointer representation; it cannot
 discover a foreign compiler's relative-vtable flags. Generated interface tables and
-RTTI-owned Rust objects currently use pointer entries. Relative32 objects require
+RTTI-enabled Rust objects currently use pointer entries. Relative32 objects require
 the explicit `relative_function` resolver; relative metadata is rejected by
-`new_with_rtti` instead of being attached to an incompatible pointer table.
+`RttiClass::new` instead of being attached to an incompatible pointer table.
 
 Apple arm64e pointer authentication requires compiler-specific signing and
 authentication adapters and is not covered by the unsigned Apple representation.
@@ -321,18 +334,15 @@ Clang's relative32 representation. These are separate contracts, not aliases for
 
 The native class supplies the real type identity and inheritance graph. C++ can
 then use `typeid`, downcasts, cross-casts, and `dynamic_cast<void*>` on those Rust
-objects. Construction checks the ABI, complete-type identity, interface count,
-and subobject offsets. The constructor is unsafe because the caller must also
-match the complete nonvirtual inheritance graph and every declared method contract.
-Extracted native descriptors, locator records, and raw-name fields must remain
-immutable and loaded for the process lifetime; the source table and relative proxy
-only need to remain readable and unchanged during extraction. Relative32 tables
-combined with Apple arm64 tagged-name encoding are not currently supported. The
-metadata API does not currently model unloadable modules with borrowed lifetimes.
-The allocation owns its prefixed callback tables, including when ownership passes
-through `into_raw` and `from_raw`. The returned `RttiOwnedObject<T>` retains its
-table storage in the allocation's type; ordinary objects retain their original size
-with no RTTI ownership fields.
+objects. `RttiClass::new` checks the ABI, complete-type identity, interface count,
+subobject offsets, and Microsoft construction-displacement and virtual-inheritance
+flags. It is unsafe because the caller must also match the complete nonvirtual
+inheritance graph and every declared method contract; Itanium virtual inheritance
+cannot be detected without the C++ runtime and remains the caller's responsibility.
+Native descriptors are treated as C++ treats `type_info`: static storage whose
+module stays loaded while it is used. Module unloading is not modeled; the source
+table and relative proxy only need to remain readable during extraction. Relative32
+tables combined with Apple arm64 tagged-name encoding are not currently supported.
 
 The allocation-free `cppvtable_abi::rtti` APIs also inspect native type identity,
 encoded names, and complete-object addresses. Explicit runtime function-pointer
@@ -350,8 +360,26 @@ required when callers rely on those direct implementation calls.
 
 The [native RTTI fixtures](crates/cppvtable-cpp-tests/src/rtti.rs) show the matching
 C++ classes, metadata extraction, Rust implementations, and runtime cast adapters.
-The [relative32 fixture](crates/cppvtable-cpp-tests/src/rtti_relative.rs) demonstrates
+The [relative32 fixture](crates/cppvtable-cpp-tests/src/rtti/relative.rs) demonstrates
 explicit metadata and function-entry decoding without assuming pointer-sized slots.
+
+## Vtable hooking
+
+`cppvtable::hook` hooks native C++ objects without touching their shared tables.
+`ShadowVtable::copy_native(address_point, prefix_size, entries)` copies a
+pointer-entry vtable together with the bytes before its address point, so `typeid`
+and `dynamic_cast` keep working. `ShadowVtable::replace` swaps entries and returns
+the originals for forwarding, and `swap_vtable` points one object at the copy and
+returns its previous table for restoration. Other objects of the class are
+unaffected. Pass `RttiMetadata::prefix_size()` as the prefix size, plus any Itanium
+virtual-base offset entries that precede it.
+
+`patch_vtable_entry` instead overwrites an entry of a shared table in place,
+affecting every object that uses it. It is not guaranteed to work: compiler vtables
+normally live in read-only memory, native callers may devirtualize the call, and
+making memory writable is the caller's job. Nothing tracks which objects point at a
+copy; restore their tables before dropping it. See the
+[hooking fixture](crates/cppvtable-cpp-tests/src/rtti/hook.rs).
 
 ## Compiler support and scope
 
@@ -374,8 +402,8 @@ This library implements declared virtual interface contracts. It does not genera
 arbitrary C++ class layouts, virtual inheritance, constructor/destructor
 protocols, covariant-return thunks, or C++ exception interoperability. Use explicit
 base interface pointers for foreign multiple inheritance. Rust-created interfaces
-require the RTTI constructor for C++ `dynamic_cast` and `typeid`, and must never be
-passed to C++ `delete`.
+require an `RttiClass` for C++ `dynamic_cast` and `typeid`, and must never be passed
+to C++ `delete`.
 
 ABI references: [Clang's Microsoft ABI compatibility](https://clang.llvm.org/docs/MSVCCompatibility.html)
 and the [Itanium C++ ABI](https://itanium-cxx-abi.github.io/cxx-abi/abi.html).

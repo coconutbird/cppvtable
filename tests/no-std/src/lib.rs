@@ -62,18 +62,50 @@ impl ICppValueImpl for CppValue {
     }
 }
 
-/// Compile the owned native RTTI constructor without inventing metadata or calling it.
+/// Compile the native RTTI class constructor without inventing metadata or calling it.
 ///
 /// # Safety
 ///
-/// `metadata` must satisfy [`OwnedObject::new_with_rtti`] for this single C++ interface,
-/// including the inheritance, offset, callback, and loaded-module lifetime contracts.
-pub unsafe fn with_native_rtti(
-    value: u32,
+/// `metadata` must satisfy [`cppvtable::rtti::RttiClass::new`] for this single C++
+/// interface, including the inheritance, offset, and callback contracts.
+pub unsafe fn native_class(
     metadata: cppvtable::rtti::RttiMetadata,
-) -> Result<cppvtable::RttiOwnedObject<CppValue>, cppvtable::rtti::RttiError> {
-    // SAFETY: The caller supplies matching live native metadata under the factory contract.
-    unsafe { OwnedObject::new_with_rtti(CppValue { value }, &[Some(metadata)]) }
+) -> Result<cppvtable::rtti::RttiClass<CppValue>, cppvtable::rtti::RttiError> {
+    // SAFETY: The caller supplies matching native metadata under the class contract.
+    unsafe { cppvtable::rtti::RttiClass::new(&[Some(metadata)]) }
+}
+
+/// Allocate an object that shares the tables of `class`.
+#[must_use]
+pub fn with_native_rtti(
+    value: u32,
+    class: &cppvtable::rtti::RttiClass<CppValue>,
+) -> cppvtable::rtti::RttiObject<'_, CppValue> {
+    cppvtable::rtti::RttiObject::new(CppValue { value }, class)
+}
+
+/// Hook one object's C++ interface through a copy of its table.
+///
+/// Returns the copy, which must stay alive until the original table is restored.
+///
+/// # Safety
+///
+/// `object` must be a live native interface with `entries` pointer entries and an
+/// RTTI prefix of `prefix_size` bytes; `hook` must match slot zero's signature.
+pub unsafe fn hook_first_entry(
+    object: *mut core::ffi::c_void,
+    prefix_size: usize,
+    entries: usize,
+    hook: *const core::ffi::c_void,
+) -> (cppvtable::hook::ShadowVtable, *const core::ffi::c_void) {
+    // SAFETY: The caller guarantees the table shape, signature, and exclusive access.
+    unsafe {
+        let table = object.cast::<*const core::ffi::c_void>().read();
+        let mut shadow = cppvtable::hook::ShadowVtable::copy_native(table, prefix_size, entries);
+        let _ = shadow.replace(0, hook);
+        let previous = cppvtable::hook::swap_vtable(object, shadow.address_point());
+        (shadow, previous)
+    }
 }
 
 /// A COM interface using the crate's platform-specific GUID and HRESULT definitions.
