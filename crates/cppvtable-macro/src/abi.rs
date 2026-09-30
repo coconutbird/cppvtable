@@ -4,12 +4,15 @@
 //! | -------------- | --- | ----------------- |
 //! | `com` | `extern "system"` (stdcall) | `extern "system"` |
 //! | `cpp` on MSVC targets | `extern "thiscall"` (`this` in ECX) | `extern "C"` |
-//! | `cpp` on Itanium targets | `extern "C"` | `extern "C"` |
+//! | `cpp` on Windows GNU targets | `extern "thiscall"` | `extern "C"` |
+//! | `cpp` on other Itanium targets | `extern "C"` | `extern "C"` |
 //! | `c` | `extern "C"` | `extern "C"` |
 //!
 //! `cpp` selects the Microsoft ABI on MSVC targets and the Itanium ABI otherwise.
 //! `msvc` and `itanium` select those interfaces explicitly and reject incompatible
 //! targets. The Microsoft ABI uses `thiscall` on x86; Itanium uses the C convention.
+//! Windows GNU is the exception: its x86 Itanium methods use `thiscall`, while
+//! retaining Itanium aggregate return placement rather than the Microsoft rules.
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -89,8 +92,17 @@ impl Abi {
                         aggregate_hidden: true,
                     },
                     AbiVariant {
-                        cfg: quote! { #[cfg(not(target_env = "msvc"))] },
+                        cfg: quote! { #[cfg(all(
+                            not(target_env = "msvc"),
+                            not(all(target_arch = "x86", target_os = "windows", target_env = "gnu"))
+                        ))] },
                         convention: "C",
+                        hidden_before_this: true,
+                        aggregate_hidden: false,
+                    },
+                    AbiVariant {
+                        cfg: quote! { #[cfg(all(target_arch = "x86", target_os = "windows", target_env = "gnu"))] },
+                        convention: "thiscall",
                         hidden_before_this: true,
                         aggregate_hidden: false,
                     },
@@ -120,7 +132,7 @@ mod tests {
 
         assert_eq!(Abi::Com.variants().len(), 1);
         assert_eq!(Abi::C.variants().len(), 1);
-        assert_eq!(Abi::Cpp.variants().len(), 3);
+        assert_eq!(Abi::Cpp.variants().len(), 4);
         assert_eq!(Abi::Com.variants()[0].convention, "system");
         assert_eq!(Abi::Cpp.variants()[0].convention, "thiscall");
         assert_eq!(Abi::Cpp.variants()[1].convention, "C");
@@ -128,6 +140,9 @@ mod tests {
         assert!(!Abi::Cpp.variants()[0].hidden_before_this);
         assert!(!Abi::Cpp.variants()[1].hidden_before_this);
         assert!(Abi::Cpp.variants()[2].hidden_before_this);
+        assert_eq!(Abi::Cpp.variants()[3].convention, "thiscall");
+        assert!(Abi::Cpp.variants()[3].hidden_before_this);
+        assert!(!Abi::Cpp.variants()[3].aggregate_hidden);
         assert!(Abi::Com.is_com());
         assert!(!Abi::Cpp.is_com());
     }

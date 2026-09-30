@@ -9,12 +9,14 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-# Use the `GUID` and `HRESULT` types of `windows-core` instead of the own types.
+# Use windows-core GUID/HRESULT on Windows; other targets retain the local types.
 windows-compat = ["dep:windows-core"]
 
 [dependencies]
 cppvtable-abi.workspace = true
 cppvtable-macro.workspace = true
+
+[target.'cfg(windows)'.dependencies]
 windows-core = { workspace = true, optional = true }
 
 [lints]

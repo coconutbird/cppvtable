@@ -539,6 +539,29 @@ fn caller_method(
     }
 }
 
+/// Select native RTTI representation without asserting that an object has RTTI.
+fn cpp_abi_metadata(abi: Abi, abi_crate: &TokenStream) -> TokenStream {
+    match abi {
+        Abi::Cpp => quote! {
+            const CPP_ABI: ::core::option::Option<#abi_crate::rtti::CppAbi> = {
+                #[cfg(target_env = "msvc")]
+                { ::core::option::Option::Some(#abi_crate::rtti::CppAbi::Msvc) }
+                #[cfg(not(target_env = "msvc"))]
+                { ::core::option::Option::Some(#abi_crate::rtti::CppAbi::Itanium) }
+            };
+        },
+        Abi::Msvc => quote! {
+            const CPP_ABI: ::core::option::Option<#abi_crate::rtti::CppAbi> =
+                ::core::option::Option::Some(#abi_crate::rtti::CppAbi::Msvc);
+        },
+        Abi::Itanium => quote! {
+            const CPP_ABI: ::core::option::Option<#abi_crate::rtti::CppAbi> =
+                ::core::option::Option::Some(#abi_crate::rtti::CppAbi::Itanium);
+        },
+        Abi::C | Abi::Com => TokenStream::new(),
+    }
+}
+
 /// Make the implementation of the trait `Interface`.
 fn interface_trait_impl(
     args: &InterfaceArgs,
@@ -551,6 +574,7 @@ fn interface_trait_impl(
 ) -> TokenStream {
     let name = &model.name;
     let name_text = name.to_string();
+    let cpp_abi = cpp_abi_metadata(args.abi, abi_crate);
     let layout = match args.layout {
         Layout::Pointer => quote! { #abi_crate::VtableLayout::Pointer },
         Layout::Inline => quote! { #abi_crate::VtableLayout::Inline },
@@ -639,6 +663,7 @@ fn interface_trait_impl(
             type Vtbl = #vtbl_name;
             const NAME: &'static str = #name_text;
             const LAYOUT: #abi_crate::VtableLayout = #layout;
+            #cpp_abi
         }
         #base_layout_check
         #inline_extent_check

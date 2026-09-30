@@ -10,6 +10,19 @@ use core::ptr::NonNull;
 
 use crate::{Interface, VtablePtr};
 
+/// Physical interface properties used when attaching C++ RTTI to an object.
+#[derive(Clone, Copy, Debug)]
+pub struct InterfaceDescriptor {
+    /// Whether the object holds a pointer or inline table entries.
+    pub layout: crate::VtableLayout,
+    /// Native C++ ABI, or `None` for C interfaces.
+    pub cpp_abi: Option<crate::rtti::CppAbi>,
+    /// Size of the declared function table in bytes, including reserved entries.
+    pub table_size: usize,
+    /// Alignment of the declared function table.
+    pub table_align: usize,
+}
+
 /// Metadata for a C/C++ interface and its prefix-compatible base interfaces.
 ///
 /// The [`crate::interface`] macro implements this trait.
@@ -37,7 +50,9 @@ pub unsafe trait CppInterface: Interface {
 /// # Safety
 ///
 /// `Vtables` must be a nonempty C-layout header containing one interface storage
-/// field per entry of `SLOT_OFFSETS` and `vtable_slots`. The offsets must identify
+/// field per entry of `SLOT_OFFSETS`, `INTERFACES`, and `vtable_slots`; all three
+/// lists must have equal lengths. Each descriptor must give the exact layout,
+/// C++ ABI, table size, and table alignment of its interface. The offsets must identify
 /// those fields in order, with the primary interface at zero. Each field must use
 /// its interface's declared layout and the corresponding static table's entries.
 /// Every shim must adjust `this` to the correct [`Object<Self>`]. `slot_for_type`
@@ -49,6 +64,8 @@ pub unsafe trait Implement: Sized + 'static {
     type Primary: CppInterface;
     /// Byte offsets of each interface header, in declaration order.
     const SLOT_OFFSETS: &'static [usize];
+    /// Physical properties for each interface in declaration order.
+    const INTERFACES: &'static [InterfaceDescriptor];
     /// Initial interface headers for a new object.
     fn vtables() -> Self::Vtables;
     /// Addresses of the static table templates, in interface order.
@@ -74,10 +91,14 @@ pub unsafe trait Implements<I: CppInterface>: Implement {
 /// Allocate using [`OwnedObject::new`]. Each interface header contains either a
 /// pointer to a static table or inline table entries, as declared by that interface.
 /// Secondary interface chains have their own headers in this allocation.
+/// The auxiliary type defaults to `()` and takes no space. RTTI owners keep their
+/// callback table allocations after the implementation value, preserving its offset.
 #[repr(C)]
-pub struct Object<T: Implement> {
+pub struct Object<T: Implement, A = ()> {
     vtables: T::Vtables,
     data: T,
+    // Keep prefixed callback tables alive through destruction of the Rust value.
+    auxiliary: A,
 }
 
 impl<T: Implement> Object<T> {
@@ -90,7 +111,9 @@ impl<T: Implement> Object<T> {
     pub fn new(value: T) -> OwnedObject<T> {
         OwnedObject::new(value)
     }
+}
 
+impl<T: Implement, A> Object<T, A> {
     /// Borrow the implementation value.
     #[must_use]
     pub fn data(&self) -> &T {
@@ -141,17 +164,27 @@ impl<T: Implement> Object<T> {
     ///
     /// # Safety
     ///
-    /// See [`Self::from_slot`].
+    /// `this` must identify a live interface header for this implementation and slot.
+    /// Its header and data prefix must match `Object<T>`; a trailing auxiliary value
+    /// does not change that prefix. The data must remain alive for the returned borrow.
     #[must_use]
     pub unsafe fn impl_from_slot<'a>(this: *mut c_void, slot: usize) -> &'a T {
-        unsafe { Self::from_slot(this, slot) }.data()
+        unsafe {
+            let object = this
+                .cast::<u8>()
+                .sub(Self::slot_offset(slot))
+                .cast::<Self>();
+            &*core::ptr::addr_of!((*object).data)
+        }
     }
 
     /// Recover the allocation address from its implementation field.
     ///
     /// # Safety
     ///
-    /// `data` must be the actual field of a live `Object<T>`, not a standalone value.
+    /// `data` must be the actual field of a live object with this header/data prefix,
+    /// not a standalone value. Recover ownership only with the allocation's original
+    /// auxiliary type; a prefix pointer does not authorize destroying a larger object.
     #[must_use]
     pub unsafe fn of_data(data: &T) -> *const Self {
         unsafe {
@@ -166,7 +199,8 @@ impl<T: Implement> Object<T> {
     ///
     /// # Safety
     ///
-    /// The pointer must own the sole allocation ownership. No caller may access the
+    /// The pointer must own the sole allocation ownership and retain the original
+    /// auxiliary type `A` used for allocation. No caller may access the
     /// object after destruction, and no borrowed interface may remain live.
     pub unsafe fn destroy(object: *const Self) {
         drop(unsafe { Box::from_raw(object.cast_mut()) });
@@ -203,9 +237,12 @@ impl<I: CppInterface> InterfaceRef<'_, I> {
 /// The object is destroyed once when this handle is dropped. Foreign code may borrow
 /// its raw interfaces while the handle is alive; lifetime and thread rules for those
 /// raw pointers remain the caller's responsibility.
-pub struct OwnedObject<T: Implement> {
-    object: NonNull<Object<T>>,
+pub struct OwnedObject<T: Implement, A = ()> {
+    object: NonNull<Object<T, A>>,
 }
+
+/// An owned C++ object with native RTTI and allocation-owned callback tables.
+pub type RttiOwnedObject<T> = OwnedObject<T, crate::rtti::RttiTables>;
 
 impl<T: Implement> OwnedObject<T> {
     /// Allocate the object and initialize its static vtable pointers.
@@ -214,12 +251,63 @@ impl<T: Implement> OwnedObject<T> {
         let object = Box::new(Object {
             vtables: T::vtables(),
             data: value,
+            auxiliary: (),
         });
         Self {
             object: NonNull::from(Box::leak(object)),
         }
     }
 
+    /// Allocate an object with native C++ RTTI and Rust callback implementations.
+    ///
+    /// Supply metadata in `#[implement]` interface order. Every C++ interface needs
+    /// `Some(metadata)`; C interfaces use `None`. The metadata can be captured from
+    /// compiler-generated tables using [`crate::rtti::RttiMetadata`]. The new tables
+    /// remain owned by this allocation, including across `into_raw`/`from_raw`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::rtti::RttiError`] for mismatched counts, interface kinds, ABIs,
+    /// type identities, offsets, unsupported table layouts or RTTI representations,
+    /// construction tables, or Microsoft metadata marked with virtual inheritance.
+    /// Checked structural mismatches may be supplied and are rejected before installation.
+    ///
+    /// # Safety
+    ///
+    /// Metadata that passes the structural checks must describe one compatible
+    /// complete C++ class, with exactly the same interface subobjects, inheritance,
+    /// offsets, and callback contracts. Only nonvirtual inheritance is supported for
+    /// Rust-created objects. All base subobjects reachable by RTTI must exist at the
+    /// declared offsets; equal offsets and type names alone do not establish this.
+    /// Native code may call declared virtual methods and use RTTI, but must not access
+    /// undeclared C++ data, invoke constructors/destructors, or delete this Rust
+    /// allocation. Callback calls must dispatch through the table: native
+    /// final/devirtualized method bodies must not replace Rust callbacks. Metadata and
+    /// its runtime/module must remain loaded while the allocation exists.
+    pub unsafe fn new_with_rtti(
+        value: T,
+        metadata: &[Option<crate::rtti::RttiMetadata>],
+    ) -> Result<RttiOwnedObject<T>, crate::rtti::RttiError> {
+        let tables = crate::rtti::RttiTables::new::<T>(metadata)?;
+        let mut object = Box::new(Object {
+            vtables: T::vtables(),
+            data: value,
+            auxiliary: tables,
+        });
+        // SAFETY: Tables validated every replacement as a pointer-layout C++ header.
+        // Implement's contract provides exact header offsets within this allocation.
+        unsafe {
+            object
+                .auxiliary
+                .install(core::ptr::from_mut(&mut object.vtables).cast::<u8>());
+        }
+        Ok(OwnedObject {
+            object: NonNull::from(Box::leak(object)),
+        })
+    }
+}
+
+impl<T: Implement, A> OwnedObject<T, A> {
     /// Borrow the Rust implementation value.
     #[must_use]
     pub fn get(&self) -> &T {
@@ -249,7 +337,7 @@ impl<T: Implement> OwnedObject<T> {
     where
         T: Implements<I>,
     {
-        unsafe { Object::<T>::slot_ptr(self.object.as_ptr(), <T as Implements<I>>::SLOT) }
+        unsafe { Object::<T, A>::slot_ptr(self.object.as_ptr(), <T as Implements<I>>::SLOT) }
     }
 
     /// Transfer allocation ownership to a raw pointer.
@@ -257,7 +345,7 @@ impl<T: Implement> OwnedObject<T> {
     /// Reclaim it with [`Self::from_raw`] or [`Object::destroy`]. The pointer is the
     /// allocation address, which is also the primary interface address.
     #[must_use]
-    pub fn into_raw(self) -> *mut Object<T> {
+    pub fn into_raw(self) -> *mut Object<T, A> {
         let pointer = self.object.as_ptr();
         core::mem::forget(self);
         pointer
@@ -270,14 +358,14 @@ impl<T: Implement> OwnedObject<T> {
     /// `object` must come from [`Self::into_raw`] and still uniquely own a live
     /// allocation. No other owning handle may exist.
     #[must_use]
-    pub unsafe fn from_raw(object: *mut Object<T>) -> Self {
+    pub unsafe fn from_raw(object: *mut Object<T, A>) -> Self {
         Self {
             object: unsafe { NonNull::new_unchecked(object) },
         }
     }
 
     fn borrow_slot<I: CppInterface>(&self, slot: usize) -> InterfaceRef<'_, I> {
-        let pointer = unsafe { Object::<T>::slot_ptr(self.object.as_ptr(), slot) };
+        let pointer = unsafe { Object::<T, A>::slot_ptr(self.object.as_ptr(), slot) };
         // Interface's layout contract guarantees that these pointer bytes form I.
         let interface = unsafe { core::ptr::read(core::ptr::from_ref(&pointer).cast::<I>()) };
         InterfaceRef {
@@ -287,7 +375,7 @@ impl<T: Implement> OwnedObject<T> {
     }
 }
 
-impl<T: Implement> Deref for OwnedObject<T> {
+impl<T: Implement, A> Deref for OwnedObject<T, A> {
     type Target = T;
 
     fn deref(&self) -> &T {
@@ -295,16 +383,16 @@ impl<T: Implement> Deref for OwnedObject<T> {
     }
 }
 
-impl<T: Implement> Drop for OwnedObject<T> {
+impl<T: Implement, A> Drop for OwnedObject<T, A> {
     fn drop(&mut self) {
-        unsafe { Object::<T>::destroy(self.object.as_ptr()) };
+        unsafe { Object::<T, A>::destroy(self.object.as_ptr()) };
     }
 }
 
 // SAFETY: This handle uniquely owns T; all interface views borrow the handle.
-unsafe impl<T: Implement + Send> Send for OwnedObject<T> {}
+unsafe impl<T: Implement + Send, A: Send> Send for OwnedObject<T, A> {}
 // SAFETY: Shared handle methods expose only shared references to T.
-unsafe impl<T: Implement + Sync> Sync for OwnedObject<T> {}
+unsafe impl<T: Implement + Sync, A: Sync> Sync for OwnedObject<T, A> {}
 
 /// Obtain an interface pointer from an implementation method's `self` value.
 ///

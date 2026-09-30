@@ -198,6 +198,16 @@ fn storage_plan(
             let field = format_ident!("slot_{slot}");
             quote! { ::core::mem::offset_of!(#storage_name, #field) }
         });
+        let descriptors = args.interfaces.iter().map(|interface| {
+            quote! {
+                #krate::InterfaceDescriptor {
+                    layout: <#interface as #abi_krate::Interface>::LAYOUT,
+                    cpp_abi: <#interface as #abi_krate::Interface>::CPP_ABI,
+                    table_size: ::core::mem::size_of::<<#interface as #abi_krate::Interface>::Vtbl>(),
+                    table_align: ::core::mem::align_of::<<#interface as #abi_krate::Interface>::Vtbl>(),
+                }
+            }
+        });
         let vis = &item.vis;
         (
             quote! {
@@ -208,7 +218,10 @@ fn storage_plan(
             },
             quote! { #storage_name },
             quote! { #storage_name { #(#values)* } },
-            quote! { const SLOT_OFFSETS: &'static [usize] = &[#(#offsets),*]; },
+            quote! {
+                const SLOT_OFFSETS: &'static [usize] = &[#(#offsets),*];
+                const INTERFACES: &'static [#krate::InterfaceDescriptor] = &[#(#descriptors),*];
+            },
         )
     } else {
         (

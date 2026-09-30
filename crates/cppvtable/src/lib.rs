@@ -98,15 +98,39 @@
 //! // SAFETY: `input` remains alive and readable throughout the call.
 //! assert_eq!(unsafe { IReaderImpl::read(&reader, &input) }, 5);
 //! ```
+//!
+//! RTTI ownership retains the allocation's auxiliary storage type across raw transfers.
+//! An RTTI allocation cannot be reclaimed as an ordinary owner:
+//!
+//! ```compile_fail,E0308
+//! use cppvtable::{Implement, OwnedObject, RttiOwnedObject};
+//! fn wrong_owner<T: Implement>(owner: RttiOwnedObject<T>) {
+//!     let raw = owner.into_raw();
+//!     let _: OwnedObject<T> = unsafe { OwnedObject::from_raw(raw) };
+//! }
+//! ```
+//!
+//! Reclaim it with the matching specialized owner so its RTTI tables are also destroyed:
+//!
+//! ```
+//! use cppvtable::{Implement, RttiOwnedObject};
+//! fn round_trip<T: Implement>(owner: RttiOwnedObject<T>) -> RttiOwnedObject<T> {
+//!     let raw = owner.into_raw();
+//!     // SAFETY: `raw` retains sole ownership and its original auxiliary storage type.
+//!     unsafe { RttiOwnedObject::from_raw(raw) }
+//! }
+//! ```
 
 #![no_std]
 
 extern crate alloc;
 
 mod object;
+pub mod rtti;
 
 pub use cppvtable_abi::{Interface, VtableLayout, VtablePtr, raw_of, vtable_of};
 pub use cppvtable_macro::{implement_native as implement, interface_native as interface};
 pub use object::{
-    CppInterface, Implement, Implements, InterfaceRef, Object, OwnedObject, interface_of,
+    CppInterface, Implement, Implements, InterfaceDescriptor, InterfaceRef, Object, OwnedObject,
+    RttiOwnedObject, interface_of,
 };

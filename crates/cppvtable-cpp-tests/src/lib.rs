@@ -36,6 +36,13 @@ mod multi;
     expect(dead_code, reason = "compiler fixtures are used in tests")
 )]
 mod returns;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "compiler fixtures are used in tests")
+)]
+mod rtti;
+#[cfg(all(test, has_relative_vtables))]
+mod rtti_relative;
 #[cfg(test)]
 mod single;
 

@@ -4,6 +4,11 @@
 //! the shared ABI interface metadata, while
 //! `IUnknown`, `QueryInterface`, owning pointers, and reference-count policies live here.
 //!
+//! This is a `no_std` library using `alloc` for object storage. Applications must
+//! provide a global allocator when constructing objects; reference-count policies
+//! require target support for 32-bit atomics. `windows-compat` substitutes Windows
+//! types only on Windows targets and keeps the local representations elsewhere.
+//!
 //! A declaration's method safety is preserved in its generated implementation trait.
 //! Ordinary Rust methods can be called directly on a standalone implementation value:
 //!

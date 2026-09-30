@@ -265,7 +265,93 @@ implementations of that interface to satisfy its threading contract. Custom
 ownership contracts.
 
 Enable `cppvtable-com/windows-compat` to use `windows-core`'s `GUID` and `HRESULT`.
-This feature does not change either ordinary C/C++ crate.
+This substitution applies on Windows. Other targets retain the crate's local
+representations, including when all features are enabled. This feature does not
+change either ordinary C/C++ crate.
+
+## Using the libraries without std
+
+`cppvtable-abi`, `cppvtable`, and `cppvtable-com` are `no_std` libraries. The ABI
+crate needs no allocator; the two object libraries use `alloc::boxed::Box`, so
+applications allocating Rust implementations must supply a global allocator.
+COM reference-count policies also require target support for 32-bit atomics.
+Procedural macros execute on the build host and do not add a target `std` dependency.
+
+The maintained consumer in `tests/no-std` compiles and exercises generated pointer,
+inline, and COM interfaces. Its CI checks all features on `thumbv7em-none-eabi`:
+
+```sh
+cargo check -p cppvtable-abi -p cppvtable -p cppvtable-com --all-features --target thumbv7em-none-eabi
+cargo check --manifest-path tests/no-std/Cargo.toml --all-features --target thumbv7em-none-eabi
+```
+
+## C++ RTTI
+
+RTTI is opt-in for Rust-created objects. Use `OwnedObject::new_with_rtti` to combine
+the generated Rust callbacks with MSVC or Itanium metadata from a matching native
+C++ class. Capture that metadata with
+`cppvtable::rtti::RttiMetadata::from_interface(abi, native_pointer)`, then supply
+one `Some(metadata)` per C++ interface in `#[implement]` order. Independent C
+interfaces use `None`.
+
+ABI families and RTTI representations are separate. Use
+`RttiMetadata::from_interface_variant` for an explicit `RttiVariant`:
+
+| Representation | Support |
+| --- | --- |
+| `MsvcAbsolute` | Absolute-pointer locator revision 0; native x86 tests. |
+| `MsvcImageRelative` | Image-relative locator revision 1; native x64 tests. |
+| `ItaniumPointer` | Pointer-sized entries and ordinary type-info names; native Linux Clang tests. |
+| `ItaniumAppleArm64` | Unsigned pointer tables and tagged type-info name pointers; wire-format tests, no native Apple validation. |
+| `ItaniumRelative32` | Clang signed 32-bit table components and RTTI proxies with ordinary untagged type names; native inspection and explicit function-resolution tests. |
+
+The MSVC convenience constructor reads the locator revision. The Itanium convenience
+constructor selects the ordinary target-default pointer representation; it cannot
+discover a foreign compiler's relative-vtable flags. Generated interface tables and
+RTTI-owned Rust objects currently use pointer entries. Relative32 objects require
+the explicit `relative_function` resolver; relative metadata is rejected by
+`new_with_rtti` instead of being attached to an incompatible pointer table.
+
+Apple arm64e pointer authentication requires compiler-specific signing and
+authentication adapters and is not covered by the unsigned Apple representation.
+Actual IA-64 function-descriptor tables are also outside the supported table model.
+ARM32's exception-table RTTI relocations do not change ordinary object vtables into
+Clang's relative32 representation. These are separate contracts, not aliases for
+`itanium`.
+
+The native class supplies the real type identity and inheritance graph. C++ can
+then use `typeid`, downcasts, cross-casts, and `dynamic_cast<void*>` on those Rust
+objects. Construction checks the ABI, complete-type identity, interface count,
+and subobject offsets. The constructor is unsafe because the caller must also
+match the complete nonvirtual inheritance graph and every declared method contract.
+Extracted native descriptors, locator records, and raw-name fields must remain
+immutable and loaded for the process lifetime; the source table and relative proxy
+only need to remain readable and unchanged during extraction. Relative32 tables
+combined with Apple arm64 tagged-name encoding are not currently supported. The
+metadata API does not currently model unloadable modules with borrowed lifetimes.
+The allocation owns its prefixed callback tables, including when ownership passes
+through `into_raw` and `from_raw`. The returned `RttiOwnedObject<T>` retains its
+table storage in the allocation's type; ordinary objects retain their original size
+with no RTTI ownership fields.
+
+The allocation-free `cppvtable_abi::rtti` APIs also inspect native type identity,
+encoded names, and complete-object addresses. Explicit runtime function-pointer
+adapters enable Rust-side dynamic casts without forcing a C++ runtime dependency
+on every `no_std` consumer. Native foreign objects retain their compiler's RTTI
+behavior, including virtual inheritance; creating virtual base layouts in Rust is
+outside this library's object model.
+
+`OwnedObject::new` retains ordinary dispatch-only tables and must not be passed to
+C++ RTTI operations. RTTI does not authorize C++ access to undeclared data members,
+construction/destruction, or `delete` of a Rust allocation. Callback calls must stay
+virtual through the declared interfaces; native final or devirtualized method bodies
+cannot replace Rust callbacks. A native bridge whose bodies forward into Rust is
+required when callers rely on those direct implementation calls.
+
+The [native RTTI fixtures](crates/cppvtable-cpp-tests/src/rtti.rs) show the matching
+C++ classes, metadata extraction, Rust implementations, and runtime cast adapters.
+The [relative32 fixture](crates/cppvtable-cpp-tests/src/rtti_relative.rs) demonstrates
+explicit metadata and function-entry decoding without assuming pointer-sized slots.
 
 ## Compiler support and scope
 
@@ -277,15 +363,19 @@ The native compiler test matrix is:
 | Windows x86 and x86-64 | clang-cl | Microsoft C++ |
 | Linux x86-64 | clang / clang++ | C / Itanium C++ |
 
-Other architectures are not covered by this matrix. The target determines calling conventions:
-Microsoft x86 C++ uses `thiscall`; other supported C++ targets use the platform C
-calling convention. COM uses `system`, and C tables use `C`.
+Other architectures are not covered by this matrix. The target determines calling
+conventions: Microsoft x86 C++ and Windows GNU x86 C++ use `thiscall`; other
+supported C++ targets use the platform C calling convention. COM uses `system`, and
+C tables use `C`. Windows GNU retains Itanium aggregate return placement. This
+distinction was checked against Clang and Rust-generated IR, with a maintained
+cross-compilation check; MinGW is not yet included in the native execution matrix.
 
 This library implements declared virtual interface contracts. It does not generate
-arbitrary C++ class layouts, RTTI, virtual inheritance, constructor/destructor
+arbitrary C++ class layouts, virtual inheritance, constructor/destructor
 protocols, covariant-return thunks, or C++ exception interoperability. Use explicit
 base interface pointers for foreign multiple inheritance. Rust-created interfaces
-must not be used with C++ `dynamic_cast`, `typeid`, or `delete`.
+require the RTTI constructor for C++ `dynamic_cast` and `typeid`, and must never be
+passed to C++ `delete`.
 
 ABI references: [Clang's Microsoft ABI compatibility](https://clang.llvm.org/docs/MSVCCompatibility.html)
 and the [Itanium C++ ABI](https://itanium-cxx-abi.github.io/cxx-abi/abi.html).

@@ -3,17 +3,18 @@
 //! An `HRESULT` is a 32-bit signed number. A value that is not negative is a success. A
 //! negative value is an error.
 //!
-//! With the feature `windows-compat` the crate uses `windows_core::HRESULT`. The two
-//! types have the same layout (a transparent wrapper of `i32`), the same public field,
-//! and the same methods `is_ok` and `is_err`.
+//! On Windows with `windows-compat` the crate uses `windows_core::HRESULT`; other
+//! targets retain the local type even when that feature is enabled. The two types have
+//! the same layout (a transparent wrapper of `i32`), public field, and methods `is_ok`
+//! and `is_err`.
 
-#[cfg(feature = "windows-compat")]
+#[cfg(all(windows, feature = "windows-compat"))]
 pub use windows_core::HRESULT;
 
-#[cfg(not(feature = "windows-compat"))]
+#[cfg(not(all(windows, feature = "windows-compat")))]
 pub use own::HRESULT;
 
-#[cfg(not(feature = "windows-compat"))]
+#[cfg(not(all(windows, feature = "windows-compat")))]
 mod own {
     use core::fmt;
 

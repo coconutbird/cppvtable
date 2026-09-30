@@ -28,10 +28,44 @@
 //!     fn beyond_base(&self) -> u32;
 //! }
 //! ```
+//!
+//! Inline callback tables are C headers, so C++ ABI declarations reject them:
+//!
+//! ```compile_fail
+//! #[cppvtable_abi::interface(abi = cpp, layout = inline)]
+//! unsafe trait ICppInline { fn value(&self) -> u32; }
+//! ```
+//!
+//! A base and its derived interface must use the same table representation. A
+//! pointer-layout base cannot become an inline prefix:
+//!
+//! ```compile_fail,E0080
+//! #[cppvtable_abi::interface(abi = c)]
+//! unsafe trait IPointer { fn value(&self) -> u32; }
+//! #[cppvtable_abi::interface(abi = c, layout = inline, extends(IPointer))]
+//! unsafe trait IInlineDerived { fn extra(&self) -> u32; }
+//! ```
+//!
+//! An inline base cannot become a pointer-layout prefix either:
+//!
+//! ```compile_fail,E0080
+//! #[cppvtable_abi::interface(abi = c, layout = inline)]
+//! unsafe trait IInline { fn value(&self) -> u32; }
+//! #[cppvtable_abi::interface(abi = c, extends(IInline))]
+//! unsafe trait IPointerDerived { fn extra(&self) -> u32; }
+//! ```
+//!
+//! An inline header must contain at least one entry:
+//!
+//! ```compile_fail,E0080
+//! #[cppvtable_abi::interface(abi = c, layout = inline)]
+//! unsafe trait IEmptyInline {}
+//! ```
 
 #![no_std]
 
 pub mod interface;
+pub mod rtti;
 
 pub use cppvtable_macro::interface_abi as interface;
 pub use interface::{Interface, VtableLayout, VtablePtr, raw_of, vtable_of};

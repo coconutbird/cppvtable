@@ -62,7 +62,8 @@ impl VtablePtr {
 /// - `Self` is `#[repr(transparent)]` and holds exactly one `NonNull<c_void>`.
 /// - That pointer is a valid interface pointer with the representation selected by
 ///   `LAYOUT`: either its first field points to `Self::Vtbl`, or it points directly
-///   to the inline `Self::Vtbl` prefix. The table must remain valid while borrowed.
+///   to the inline `Self::Vtbl` prefix. The table must remain valid and immutable
+///   while borrowed.
 /// - `Vtbl` is `#[repr(C)]`. For a derived interface its first field is the base vtable.
 pub unsafe trait Interface: Sized + 'static {
     /// The vtable structure of the interface.
@@ -70,6 +71,12 @@ pub unsafe trait Interface: Sized + 'static {
 
     /// The physical representation of the interface's function table.
     const LAYOUT: VtableLayout = VtableLayout::Pointer;
+
+    /// C++ runtime ABI, if this is a C++ interface rather than a C or COM table.
+    ///
+    /// This selects the RTTI representation; it does not assert that any particular
+    /// object's table actually contains RTTI. Inspecting such metadata remains unsafe.
+    const CPP_ABI: Option<crate::rtti::CppAbi> = None;
 
     /// The name of the interface. Use it for log messages.
     const NAME: &'static str;

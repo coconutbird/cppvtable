@@ -1,15 +1,16 @@
 //! The ABI representation of a 128-bit interface or class identifier.
 //!
 //! COM uses this layout for IIDs and CLSIDs.
-//! With `windows-compat`, this name is `windows_core::GUID`.
+//! On Windows with `windows-compat`, this name is `windows_core::GUID`. Other targets
+//! keep the local representation even when that feature is enabled.
 
-#[cfg(feature = "windows-compat")]
+#[cfg(all(windows, feature = "windows-compat"))]
 pub use windows_core::GUID;
 
-#[cfg(not(feature = "windows-compat"))]
+#[cfg(not(all(windows, feature = "windows-compat")))]
 pub use own::GUID;
 
-#[cfg(not(feature = "windows-compat"))]
+#[cfg(not(all(windows, feature = "windows-compat")))]
 mod own {
     use core::fmt;
 
