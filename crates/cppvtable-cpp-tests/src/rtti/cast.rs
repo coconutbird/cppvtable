@@ -138,3 +138,56 @@ fn a_null_source_casts_to_null() {
     };
     assert!(cast.is_null());
 }
+
+#[test]
+fn a_real_target_the_object_cannot_satisfy_casts_to_null() {
+    // (object class, cast from its Secondary subobject, target, succeeds)
+    let cases = [
+        // Sibling complete classes sharing the same bases.
+        (Class::Witness, false, Class::OtherWitness, false),
+        (Class::Witness, true, Class::OtherWitness, false),
+        (Class::OtherWitness, false, Class::Witness, false),
+        (Class::Witness, false, Class::VirtualWitness, false),
+        // A derived type of an object that is only the base.
+        (Class::Leaf, false, Class::Single, false),
+        (Class::Single, false, Class::Single, true),
+        // The actual complete type, reached through a private base.
+        (Class::PrivateWitness, false, Class::PrivateWitness, false),
+        (Class::PrivateWitness, true, Class::PrivateWitness, true),
+        (Class::PrivateWitness, true, Class::Root, false),
+        // A base present twice.
+        (Class::AmbiguousWitness, true, Class::Root, false),
+        (
+            Class::AmbiguousWitness,
+            false,
+            Class::AmbiguousWitness,
+            true,
+        ),
+    ];
+    for (class, from_secondary, target, succeeds) in cases {
+        let native = create_native(class);
+        let (object, source) = if from_secondary {
+            (native.secondary, Class::Secondary)
+        } else if matches!(class, Class::Leaf | Class::Single) {
+            (native.root, Class::Leaf)
+        } else {
+            (native.root, Class::Root)
+        };
+        let expected = if succeeds {
+            native.complete
+        } else {
+            core::ptr::null_mut()
+        };
+        // SAFETY: The factory returns live subobjects of their declared static types,
+        // and the object is deleted only after the cast.
+        unsafe {
+            let cast = DynamicCastRuntime::TARGET.cast(
+                object,
+                type_descriptor(source),
+                type_descriptor(target),
+            );
+            assert_eq!(cast, expected, "{class:?} via {source:?} -> {target:?}");
+            delete_native(native.complete, class);
+        }
+    }
+}
