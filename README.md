@@ -326,6 +326,12 @@ This substitution applies on Windows. Other targets retain the crate's local
 representations, including when all features are enabled. This feature does not
 change either ordinary C/C++ crate.
 
+`windows-compat` accepts every windows-core release from 0.50 through 0.100, so
+Cargo unifies it with the version your `windows` or `windows-core` dependency
+selects and the types are interchangeable with that crate's. The newest releases
+need a newer Rust than this crate's MSRV; the MSRV-aware resolver picks an older
+one on older toolchains. CI tests 0.50 on the MSRV and the newest release on stable.
+
 ## Using the libraries without std
 
 `cppvtable-abi`, `cppvtable`, and `cppvtable-com` are `no_std` libraries. The ABI

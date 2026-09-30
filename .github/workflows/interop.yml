@@ -12,6 +12,10 @@ jobs:
   windows:
     name: Windows ${{ matrix.compiler }} ${{ matrix.arch }}
     runs-on: windows-latest
+    env:
+      # Resolve the newest windows-core in the supported range even though it needs a
+      # newer Rust than the workspace MSRV. The MSRV job covers the oldest release.
+      CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: allow
     strategy:
       fail-fast: false
       matrix:
@@ -83,5 +87,9 @@ jobs:
       - uses: actions/checkout@v7
       - name: Configure Rust
         run: rustup toolchain install 1.85.1 --profile minimal
+      - name: Select the oldest supported windows-core
+        run: |
+          cargo +1.85.1 generate-lockfile
+          cargo +1.85.1 update -p windows-core --precise 0.50.0
       - name: Test workspace and native ABI fixtures
         run: cargo +1.85.1 test --workspace --all-features

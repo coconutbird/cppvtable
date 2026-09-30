@@ -1,6 +1,8 @@
 [workspace]
 members = ["crates/*", "examples/*"]
-resolver = "2"
+# Version 3 resolves dependencies against `rust-version`, so an MSRV toolchain gets the
+# newest windows-core it can build.
+resolver = "3"
 
 [workspace.package]
 version = "0.1.0"
@@ -21,7 +23,10 @@ cppvtable = { version = "0.1.0", path = "crates/cppvtable" }
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "3", features = ["full", "extra-traits"] }
-windows-core = { version = "0.62", default-features = false }
+# `windows-compat` re-exports only `GUID` and `HRESULT`, whose layout and API are the
+# same in every windows-core release in this range. The range lets Cargo unify with the
+# windows-core that the consumer's `windows` crate uses. CI tests both ends.
+windows-core = { version = ">=0.50, <0.101", default-features = false }
 
 [workspace.lints.rust]
 warnings = { level = "deny", priority = -1 }

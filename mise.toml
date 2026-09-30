@@ -41,6 +41,16 @@ run = [
   "cargo clippy --workspace --all-targets --all-features --target i686-pc-windows-msvc -- -D warnings",
 ]
 
+[tasks.windows-core]
+description = "Windows only: test windows-compat with the oldest and newest supported windows-core"
+run = [
+  "cargo update -p windows-core --precise 0.50.0",
+  "cargo +1.85.1 test -p cppvtable-com --all-features",
+  "cargo update -p windows-core --config \"resolver.incompatible-rust-versions='allow'\"",
+  "cargo test -p cppvtable-com --all-features",
+  "cargo update -p windows-core",
+]
+
 [tasks.example]
 description = "Run the C++ interop example"
 run = "cargo run -p cppvtable-example"
