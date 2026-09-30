@@ -1,144 +1,125 @@
-//! Tests for #[slot(N)] attribute - explicit vtable slot indices
+//! Explicit slots.
+//!
+//! `#[slot(N)]` puts a method at a fixed index of the derived part of the vtable. The
+//! macro fills the space with reserved entries, so the layout is the layout of the
+//! foreign header even when the declaration leaves methods out.
 
-use cppvtable::proc::{cppvtable, cppvtable_impl};
-use std::ffi::c_void;
+use core::ffi::c_void;
+use core::mem::{offset_of, size_of};
 
-/// Interface with explicit slot indices
-/// Layout: slot 0, slot 1, slots 2-4 reserved, slot 5, slot 6
-#[cppvtable]
-pub trait ISlotted {
-    fn at_slot_0(&self) -> i32;
-    fn at_slot_1(&self) -> i32;
-    #[slot(5)]
-    fn at_slot_5(&self) -> i32;
-    fn at_slot_6(&self) -> i32;
+use cppvtable::{ComObject, ComPtr, RefCounted, SingleRefCount, implement, interface};
+
+/// An interface with holes in the slot numbers.
+#[interface(abi = com, iid = "51075001-0000-4000-8000-000000000001")]
+pub unsafe trait ISparse {
+    /// The first method. It takes slot 0 of the derived part.
+    fn First(&self) -> u32;
+    /// The fourth method. Slots 1 and 2 stay reserved.
+    #[slot(3)]
+    fn Fourth(&self) -> u32;
+    /// The fifth method. It follows without a hole.
+    fn Fifth(&self) -> u32;
 }
 
-#[test]
-fn test_vtable_size_with_gaps() {
-    // 7 slots (0, 1, 2, 3, 4, 5, 6) = 7 function pointers
-    let size = std::mem::size_of::<ISlottedVTable>();
-    #[cfg(target_pointer_width = "64")]
-    assert_eq!(size, 56, "7 slots = 56 bytes on x64");
-    #[cfg(target_pointer_width = "32")]
-    assert_eq!(size, 28, "7 slots = 28 bytes on x86");
+/// A derived interface. Its own slot numbers start again at 0.
+#[interface(abi = com, iid = "51075002-0000-4000-8000-000000000002", extends(ISparse))]
+pub unsafe trait ISparseChild {
+    /// The second method of the derived part. Slot 0 stays reserved.
+    #[slot(1)]
+    fn Second(&self) -> u32;
 }
 
-#[repr(C)]
-pub struct SlotTester {
-    vtable_i_slotted: *const ISlottedVTable,
-    id: i32,
+/// The object.
+#[implement(ISparseChild)]
+struct Sparse;
+
+impl RefCounted for Sparse {
+    type Policy = SingleRefCount;
 }
 
-#[cppvtable_impl(ISlotted)]
-impl SlotTester {
-    fn at_slot_0(&self) -> i32 {
-        0
-    }
-    fn at_slot_1(&self) -> i32 {
+impl ISparseImpl for Sparse {
+    fn First(&self) -> u32 {
         1
     }
-    #[slot(5)]
-    fn at_slot_5(&self) -> i32 {
-        5
-    }
-    fn at_slot_6(&self) -> i32 {
-        6
-    }
-}
 
-impl Default for SlotTester {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl SlotTester {
-    pub fn new() -> Self {
-        SlotTester {
-            vtable_i_slotted: Self::VTABLE_I_SLOTTED,
-            id: 42,
-        }
-    }
-}
-
-#[test]
-fn test_slot_methods_return_correct_values() {
-    let tester = SlotTester::new();
-
-    assert_eq!(tester.at_slot_0(), 0);
-    assert_eq!(tester.at_slot_1(), 1);
-    assert_eq!(tester.at_slot_5(), 5);
-    assert_eq!(tester.at_slot_6(), 6);
-}
-
-#[test]
-fn test_vtable_slot_order() {
-    let tester = SlotTester::new();
-
-    unsafe {
-        let vtable = &*tester.vtable_i_slotted;
-        let this = &tester as *const SlotTester as *mut c_void;
-
-        // Call each slot and verify return value matches slot index
-        assert_eq!((vtable.at_slot_0)(this), 0);
-        assert_eq!((vtable.at_slot_1)(this), 1);
-        // Slots 2-4 are reserved (would panic if called)
-        assert_eq!((vtable.at_slot_5)(this), 5);
-        assert_eq!((vtable.at_slot_6)(this), 6);
-    }
-}
-
-/// Test interface starting with non-zero slot
-#[cppvtable]
-pub trait IStartsAtThree {
-    #[slot(3)]
-    fn first_method(&self) -> i32;
-    fn second_method(&self) -> i32;
-}
-
-#[test]
-fn test_interface_starting_at_slot_3() {
-    // Slots 0, 1, 2, 3, 4 = 5 function pointers
-    let size = std::mem::size_of::<IStartsAtThreeVTable>();
-    #[cfg(target_pointer_width = "64")]
-    assert_eq!(size, 40, "5 slots = 40 bytes on x64");
-}
-
-#[repr(C)]
-pub struct StartsAtThreeTester {
-    vtable_i_starts_at_three: *const IStartsAtThreeVTable,
-}
-
-#[cppvtable_impl(IStartsAtThree)]
-impl StartsAtThreeTester {
-    #[slot(3)]
-    fn first_method(&self) -> i32 {
-        3
-    }
-    fn second_method(&self) -> i32 {
+    fn Fourth(&self) -> u32 {
         4
     }
-}
 
-impl Default for StartsAtThreeTester {
-    fn default() -> Self {
-        Self::new()
+    fn Fifth(&self) -> u32 {
+        5
     }
 }
 
-impl StartsAtThreeTester {
-    pub fn new() -> Self {
-        StartsAtThreeTester {
-            vtable_i_starts_at_three: Self::VTABLE_I_STARTS_AT_THREE,
-        }
+impl ISparseChildImpl for Sparse {
+    fn Second(&self) -> u32 {
+        20
     }
 }
 
 #[test]
-fn test_starts_at_three() {
-    let tester = StartsAtThreeTester::new();
+fn a_reserved_entry_keeps_the_slot_number_of_the_header() {
+    let pointer = size_of::<usize>();
+    // 3 slots of `IUnknown` and 5 slots of `ISparse`.
+    assert_eq!(size_of::<ISparseVtbl>(), 8 * pointer);
+    assert_eq!(offset_of!(ISparseVtbl, First), 3 * pointer);
+    assert_eq!(offset_of!(ISparseVtbl, reserved_1), 4 * pointer);
+    assert_eq!(offset_of!(ISparseVtbl, reserved_2), 5 * pointer);
+    assert_eq!(offset_of!(ISparseVtbl, Fourth), 6 * pointer);
+    assert_eq!(offset_of!(ISparseVtbl, Fifth), 7 * pointer);
 
-    assert_eq!(tester.first_method(), 3);
-    assert_eq!(tester.second_method(), 4);
+    // 8 slots of `ISparse` and 2 slots of `ISparseChild`.
+    assert_eq!(size_of::<ISparseChildVtbl>(), 10 * pointer);
+    assert_eq!(offset_of!(ISparseChildVtbl, reserved_0), 8 * pointer);
+    assert_eq!(offset_of!(ISparseChildVtbl, Second), 9 * pointer);
+}
+
+#[test]
+fn the_static_vtable_holds_a_null_pointer_in_a_reserved_entry() {
+    let object: ComPtr<ISparseChild> = ComObject::new(Sparse);
+    let this = object.as_raw();
+    // SAFETY: `this` is a valid interface pointer of `ISparseChild`.
+    let vtable = unsafe { &*(*this.cast::<*const ISparseChildVtbl>()) };
+    assert!(vtable.base.reserved_1.is_none());
+    assert!(vtable.base.reserved_2.is_none());
+    assert!(vtable.reserved_0.is_none());
+}
+
+#[test]
+fn a_c_caller_finds_each_method_at_its_own_slot_number() {
+    let object: ComPtr<ISparseChild> = ComObject::new(Sparse);
+    let this = object.as_raw();
+    // SAFETY: `this` is a valid COM interface pointer, so the first field is the vtable.
+    let slots = unsafe { *this.cast::<*const *const c_void>() };
+
+    // Read the raw slot and call it with the signature of the method.
+    for (index, expected) in [(3_usize, 1_u32), (6, 4), (7, 5), (9, 20)] {
+        // SAFETY: The vtable of the object has 10 slots.
+        let raw = unsafe { *slots.add(index) };
+        // SAFETY: Each of these slots holds a method with the signature
+        // `fn(*mut c_void) -> u32`.
+        let method: unsafe extern "system" fn(*mut c_void) -> u32 =
+            unsafe { core::mem::transmute(raw) };
+        // SAFETY: The object is alive and the pointer is its interface pointer.
+        assert_eq!(unsafe { method(this) }, expected);
+    }
+
+    // The reserved slots hold a null pointer.
+    for index in [4_usize, 5, 8] {
+        // SAFETY: The vtable of the object has 10 slots.
+        let raw = unsafe { *slots.add(index) };
+        assert!(raw.is_null());
+    }
+}
+
+#[test]
+fn the_safe_wrapper_reaches_the_same_methods() {
+    let object: ComPtr<ISparseChild> = ComObject::new(Sparse);
+    // SAFETY: The object is alive.
+    unsafe {
+        assert_eq!(object.Second(), 20);
+        assert_eq!(object.First(), 1);
+        assert_eq!(object.Fourth(), 4);
+        assert_eq!(object.Fifth(), 5);
+    }
 }

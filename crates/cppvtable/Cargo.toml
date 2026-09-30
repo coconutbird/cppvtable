@@ -1,19 +1,18 @@
 [package]
 name = "cppvtable"
+description = "COM and C++ vtable ABI layer: interfaces, object model, reference count policies."
 version.workspace = true
 edition.workspace = true
-description = "C++ vtable interop for Rust (MSVC ABI compatible)"
-license.workspace = true
-repository.workspace = true
-
-[lints]
-workspace = true
+rust-version.workspace = true
+publish.workspace = true
 
 [features]
-default = []
+# Use the `GUID` and `HRESULT` types of `windows-core` instead of the own types.
 windows-compat = ["dep:windows-core"]
 
 [dependencies]
-cppvtable-macro = { workspace = true }
-paste = { workspace = true }
+cppvtable-macro.workspace = true
 windows-core = { workspace = true, optional = true }
+
+[lints]
+workspace = true

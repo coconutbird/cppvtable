@@ -5,11 +5,10 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 license = "MIT"
 repository = "https://github.com/coconutbird/cppvtable"
-
-[workspace.lints.clippy]
-pedantic = { level = "warn", priority = -1 }
+publish = true
 
 [workspace.dependencies]
 cpp = "0.5"
@@ -21,3 +20,24 @@ proc-macro2 = "1"
 quote = "1"
 syn = { version = "3", features = ["full", "extra-traits"] }
 windows-core = "0.62"
+
+[workspace.lints.rust]
+warnings = { level = "deny", priority = -1 }
+unused = { level = "deny", priority = -1 }
+nonstandard_style = { level = "deny", priority = -1 }
+rust_2018_idioms = { level = "deny", priority = -1 }
+future_incompatible = { level = "deny", priority = -1 }
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+style = { level = "warn", priority = -1 }
+complexity = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+[workspace.lints.rustdoc]
+all = { level = "warn", priority = -1 }

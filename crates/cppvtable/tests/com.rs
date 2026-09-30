@@ -1,315 +1,285 @@
-//! Tests for COM interface support
+//! COM behaviour: the vtable layout, `QueryInterface`, the counts, and the identity
+//! rule.
+//!
+//! The tests call the object the way a C caller calls it: they read the vtable pointer
+//! from the first field of the object and then call through the function pointer.
 
-use cppvtable::com::{ComRefCount, IUnknownVTable, S_OK};
-use cppvtable::proc::{com_implement, com_interface};
-use cppvtable::{IUnknown, VTableLayout};
-use std::ffi::c_void;
-use std::ptr;
+use core::ffi::c_void;
+use core::mem::{offset_of, size_of};
+use core::ptr;
+use core::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
-// =============================================================================
-// Test: Basic COM interface definition
-// =============================================================================
+use cppvtable::{
+    ComObject, ComPtr, E_NOINTERFACE, E_POINTER, GUID, HRESULT, IUnknown, IUnknownVtbl, Interface,
+    RefCounted, S_OK, SingleRefCount, implement, interface,
+};
 
-#[com_interface("12345678-1234-5678-9abc-def012345678")]
-pub trait ICalculator {
-    fn add(&self, a: i32, b: i32) -> i32;
-    fn multiply(&self, a: i32, b: i32) -> i32;
+/// A counter interface.
+#[interface(abi = com, iid = "0a1b2c3d-0001-4000-8000-000000000001")]
+pub unsafe trait ICounter {
+    /// Write the current value to `value`.
+    fn GetValue(&self, value: *mut u32) -> HRESULT;
+    /// Add one to the value and give the new value.
+    fn Increment(&self) -> u32;
 }
 
-#[test]
-fn test_com_interface_iid() {
-    let iid = ICalculator::iid();
-    assert_eq!(iid.data1, 0x12345678);
-    assert_eq!(iid.data2, 0x1234);
-    assert_eq!(iid.data3, 0x5678);
-    assert_eq!(iid.data4, [0x9a, 0xbc, 0xde, 0xf0, 0x12, 0x34, 0x56, 0x78]);
+/// A second interface of the same object. It is not in the chain of `ICounter`.
+#[interface(abi = com, iid = "0a1b2c3d-0002-4000-8000-000000000002")]
+pub unsafe trait INamed {
+    /// Write the address of the name to `name`.
+    fn GetName(&self, name: *mut *const u8) -> HRESULT;
 }
 
-#[test]
-fn test_com_interface_iid_const() {
-    // IID constant should also be available
-    assert_eq!(IID_ICALCULATOR.data1, 0x12345678);
+/// An object that implements both interfaces.
+///
+/// The type is private. An implementation type of a frontend is always private, because
+/// only the interfaces are public. A public implementation type makes
+/// `clippy::not_unsafe_ptr_arg_deref` fire on each method that reads a raw pointer.
+#[implement(ICounter, INamed)]
+struct Counter {
+    /// The value of the counter.
+    value: AtomicU32,
+    /// The test counts the destructions here.
+    drops: Arc<AtomicU32>,
 }
 
-#[test]
-fn test_com_vtable_has_iunknown_methods() {
-    // Verify vtable has IUnknown methods at expected positions
-    let vtable_size = std::mem::size_of::<ICalculatorVTable>();
-    // Should be: IUnknownVTable (3 ptrs) + 2 user methods = 5 function pointers worth
-    // On 64-bit: 5 * 8 = 40 bytes
-    // On 32-bit: 5 * 4 = 20 bytes
-    let ptr_size = std::mem::size_of::<*const c_void>();
-    assert_eq!(vtable_size, 5 * ptr_size);
+impl RefCounted for Counter {
+    type Policy = SingleRefCount;
 }
 
-// =============================================================================
-// Test: VTableLayout trait and inheritance
-// =============================================================================
-
-#[test]
-fn test_iunknown_vtable_layout() {
-    // IUnknown has 3 methods: QueryInterface, AddRef, Release
-    assert_eq!(<IUnknown as VTableLayout>::SLOT_COUNT, 3);
-
-    // VTable type should be IUnknownVTable (verify via size)
-    assert_eq!(
-        std::mem::size_of::<<IUnknown as VTableLayout>::VTable>(),
-        std::mem::size_of::<IUnknownVTable>()
-    );
+impl Drop for Counter {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
-#[test]
-fn test_derived_interface_vtable_layout() {
-    // ICalculator extends IUnknown (3) + 2 own methods = 5 total slots
-    assert_eq!(<ICalculator as VTableLayout>::SLOT_COUNT, 5);
-
-    // VTable type should be ICalculatorVTable (verify via size)
-    assert_eq!(
-        std::mem::size_of::<<ICalculator as VTableLayout>::VTable>(),
-        std::mem::size_of::<ICalculatorVTable>()
-    );
-}
-
-#[test]
-fn test_vtable_base_field_offset() {
-    // The `base` field (IUnknownVTable) should be at offset 0
-    let base_offset = std::mem::offset_of!(ICalculatorVTable, base);
-    assert_eq!(base_offset, 0);
-}
-
-#[test]
-fn test_vtable_embeds_iunknown() {
-    // ICalculatorVTable should embed IUnknownVTable as its first field
-    let iunknown_size = std::mem::size_of::<IUnknownVTable>();
-    let ptr_size = std::mem::size_of::<*const c_void>();
-
-    // IUnknownVTable should be 3 function pointers
-    assert_eq!(iunknown_size, 3 * ptr_size);
-
-    // ICalculatorVTable.base should be exactly IUnknownVTable sized
-    // (this verifies the embedded struct, not a pointer)
-    assert_eq!(
-        std::mem::size_of::<<IUnknown as VTableLayout>::VTable>(),
-        iunknown_size
-    );
-}
-
-// =============================================================================
-// Test: COM interface implementation
-// =============================================================================
-
-#[repr(C)]
-pub struct Calculator {
-    vtable_i_calculator: *const ICalculatorVTable,
-    ref_count: ComRefCount,
-    base_value: i32,
-}
-
-impl Calculator {
-    pub fn new(base: i32) -> Self {
-        Self {
-            vtable_i_calculator: Self::VTABLE_I_CALCULATOR,
-            ref_count: ComRefCount::new(),
-            base_value: base,
+impl ICounterImpl for Counter {
+    fn GetValue(&self, value: *mut u32) -> HRESULT {
+        if value.is_null() {
+            return E_POINTER;
         }
-    }
-}
-
-#[com_implement(ICalculator)]
-impl Calculator {
-    fn add(&self, a: i32, b: i32) -> i32 {
-        self.base_value + a + b
-    }
-
-    fn multiply(&self, a: i32, b: i32) -> i32 {
-        self.base_value * a * b
-    }
-}
-
-#[test]
-fn test_com_implement_basic() {
-    let calc = Calculator::new(10);
-
-    // Call methods directly
-    assert_eq!(calc.add(2, 3), 15); // 10 + 2 + 3
-    assert_eq!(calc.multiply(2, 3), 60); // 10 * 2 * 3
-}
-
-#[test]
-fn test_com_implement_vtable_calls() {
-    let mut calc = Calculator::new(10);
-
-    // Get interface pointer and call through vtable
-    unsafe {
-        let iface = ICalculator::from_ptr_mut(&mut calc as *mut _ as *mut c_void);
-        assert_eq!(iface.add(1, 2), 13); // 10 + 1 + 2
-        assert_eq!(iface.multiply(2, 2), 40); // 10 * 2 * 2
-    }
-}
-
-#[test]
-fn test_com_ref_counting() {
-    let mut calc = Calculator::new(10);
-
-    unsafe {
-        let iface = ICalculator::from_ptr_mut(&mut calc as *mut _ as *mut c_void);
-
-        // Initial ref count is 1
-        assert_eq!(calc.ref_count.count(), 1);
-
-        // AddRef increments
-        let count = iface.add_ref();
-        assert_eq!(count, 2);
-        assert_eq!(calc.ref_count.count(), 2);
-
-        // Release decrements
-        let count = iface.release();
-        assert_eq!(count, 1);
-        assert_eq!(calc.ref_count.count(), 1);
-    }
-}
-
-#[test]
-fn test_com_query_interface() {
-    let calc = Calculator::new(10);
-
-    unsafe {
-        let iface = ICalculator::from_ptr(&calc as *const _ as *mut c_void);
-
-        // Query for the same interface
-        let mut ppv: *mut c_void = ptr::null_mut();
-        let hr = iface.query_interface(ICalculator::iid(), &mut ppv);
-        assert_eq!(hr, S_OK);
-        assert!(!ppv.is_null());
-
-        // Queried pointer should work
-        let iface2 = ICalculator::from_ptr_mut(ppv);
-        assert_eq!(iface2.add(1, 1), 12);
-
-        // Release the extra reference from QueryInterface
-        iface2.release();
-    }
-}
-
-// =============================================================================
-// Test: Auto-generated forwarders for derived interfaces
-// =============================================================================
-
-// Define IScientificCalculator extending ICalculator
-// This tests that the auto-generated icalculator_forwarders! and icalculator_base_vtable! macros exist
-#[cppvtable::proc::cppvtable(stdcall, extends(ICalculator))]
-pub trait IScientificCalculator {
-    fn square(&self, x: i32) -> i32;
-}
-
-#[test]
-fn test_derived_interface_extends_calculator() {
-    // IScientificCalculator should have ICalculator's slot count + 1 own method
-    assert_eq!(<IScientificCalculator as VTableLayout>::SLOT_COUNT, 6);
-
-    // Vtable should be the right size: ICalculator (5 slots) + 1 own = 6 function pointers
-    let ptr_size = std::mem::size_of::<*const c_void>();
-    assert_eq!(
-        std::mem::size_of::<IScientificCalculatorVTable>(),
-        6 * ptr_size
-    );
-}
-
-// =============================================================================
-// Test: Generic COM interface support (Issue #2)
-// =============================================================================
-
-use cppvtable::com::HRESULT;
-
-/// Generic COM interface for archive readers
-/// The type parameter T represents the implementing struct type
-#[com_interface("23170f69-40c1-278a-0000-000600600000")]
-pub trait IInArchive<T> {
-    fn open(&mut self, stream: *mut c_void) -> HRESULT;
-    fn close(&mut self) -> HRESULT;
-}
-
-#[test]
-fn test_generic_interface_vtable_has_typed_this() {
-    // IInArchiveVTable<T> should be generic
-    // It should have IUnknown base (3 ptrs) + 2 methods = 5 function pointers
-    let ptr_size = std::mem::size_of::<*const c_void>();
-
-    // Test with a concrete type
-    struct MyArchive;
-    assert_eq!(
-        std::mem::size_of::<IInArchiveVTable<MyArchive>>(),
-        5 * ptr_size
-    );
-}
-
-#[test]
-fn test_generic_interface_iid() {
-    // IID should still be a constant (not dependent on type parameter)
-    assert_eq!(IID_IINARCHIVE.data1, 0x23170f69);
-    assert_eq!(IID_IINARCHIVE.data2, 0x40c1);
-    assert_eq!(IID_IINARCHIVE.data3, 0x278a);
-}
-
-#[test]
-fn test_generic_interface_wrapper_struct() {
-    // IInArchive<T> wrapper struct should exist and be the right size
-    struct MyArchive;
-
-    // The wrapper struct has: vtable pointer + PhantomData
-    // PhantomData is zero-sized, so total is just pointer size
-    let ptr_size = std::mem::size_of::<*const c_void>();
-    assert_eq!(std::mem::size_of::<IInArchive<MyArchive>>(), ptr_size);
-}
-
-#[test]
-fn test_generic_interface_vtable_layout() {
-    struct MyArchive;
-
-    // VTableLayout should work with the generic interface
-    assert_eq!(<IInArchive<MyArchive> as VTableLayout>::SLOT_COUNT, 5);
-}
-
-/// Test that vtable function pointers use *mut T instead of *mut c_void
-#[test]
-fn test_generic_vtable_function_pointer_types() {
-    struct PluginHandler {
-        _refcount: u32,
-    }
-
-    // Create a mock vtable with correctly typed function pointers
-    // These must use the system ABI and typed receiver to match the vtable signature
-    unsafe extern "system" fn mock_open(
-        _this: *mut PluginHandler,
-        _stream: *mut c_void,
-    ) -> HRESULT {
+        // SAFETY: The pointer is not null, and the caller gives a writable place.
+        unsafe { *value = self.value.load(Ordering::Relaxed) };
         S_OK
     }
-    unsafe extern "system" fn mock_close(_this: *mut PluginHandler) -> HRESULT {
-        S_OK
-    }
-    unsafe extern "system" fn mock_query_interface(
-        _this: *mut PluginHandler,
-        _riid: *const cppvtable::com::GUID,
-        _ppv: *mut *mut c_void,
-    ) -> HRESULT {
-        S_OK
-    }
-    unsafe extern "system" fn mock_add_ref(_this: *mut PluginHandler) -> u32 {
-        1
-    }
-    unsafe extern "system" fn mock_release(_this: *mut PluginHandler) -> u32 {
-        0
-    }
 
-    // This should compile because vtable expects fn(*mut PluginHandler, ...)
-    let _vtable: IInArchiveVTable<PluginHandler> = IInArchiveVTable {
-        base: IUnknownVTable {
-            query_interface: mock_query_interface,
-            add_ref: mock_add_ref,
-            release: mock_release,
-        },
-        open: mock_open,
-        close: mock_close,
+    fn Increment(&self) -> u32 {
+        self.value.fetch_add(1, Ordering::Relaxed) + 1
+    }
+}
+
+impl INamedImpl for Counter {
+    fn GetName(&self, name: *mut *const u8) -> HRESULT {
+        if name.is_null() {
+            return E_POINTER;
+        }
+        // SAFETY: The pointer is not null, and the caller gives a writable place.
+        unsafe { *name = c"counter".as_ptr().cast::<u8>() };
+        S_OK
+    }
+}
+
+/// Make a new object and give the reference and the drop counter.
+fn new_counter() -> (ComPtr<ICounter>, Arc<AtomicU32>) {
+    let drops = Arc::new(AtomicU32::new(0));
+    let object = ComObject::new(Counter {
+        value: AtomicU32::new(10),
+        drops: Arc::clone(&drops),
+    });
+    (object, drops)
+}
+
+/// Call `QueryInterface` the way a C caller does.
+unsafe fn raw_query(this: *mut c_void, iid: &GUID) -> (HRESULT, *mut c_void) {
+    let mut out: *mut c_void = ptr::null_mut();
+    // SAFETY: `this` is a valid COM interface pointer, so its first field is the vtable
+    // and slot 0 of that vtable is `QueryInterface`.
+    let result = unsafe {
+        let vtable = *this.cast::<*const IUnknownVtbl>();
+        ((*vtable).QueryInterface)(this, ptr::from_ref(iid), &raw mut out)
     };
+    (result, out)
 }
+
+#[test]
+fn the_vtable_has_the_layout_of_a_com_vtable() {
+    assert_eq!(size_of::<IUnknownVtbl>(), 3 * size_of::<usize>());
+    assert_eq!(offset_of!(IUnknownVtbl, QueryInterface), 0);
+    assert_eq!(offset_of!(IUnknownVtbl, AddRef), size_of::<usize>());
+    assert_eq!(offset_of!(IUnknownVtbl, Release), 2 * size_of::<usize>());
+
+    assert_eq!(size_of::<ICounterVtbl>(), 5 * size_of::<usize>());
+    assert_eq!(offset_of!(ICounterVtbl, base), 0);
+    assert_eq!(offset_of!(ICounterVtbl, GetValue), 3 * size_of::<usize>());
+    assert_eq!(offset_of!(ICounterVtbl, Increment), 4 * size_of::<usize>());
+}
+
+#[test]
+fn the_metadata_of_the_interface_is_correct() {
+    assert_eq!(ICounter::NAME, "ICounter");
+    // A COM interface answers its own IID and the IID of each ancestor.
+    assert!(cppvtable::interface_matches::<ICounter>(&ICounter::IID));
+    assert!(cppvtable::interface_matches::<ICounter>(&IUnknown::IID));
+    assert!(!cppvtable::interface_matches::<ICounter>(&INamed::IID));
+    assert_eq!(ICounter::ANCESTORS, &[IUnknown::IID]);
+    assert_eq!(IUnknown::ANCESTORS, &[] as &[GUID]);
+    assert_eq!(
+        IUnknown::IID,
+        GUID::from_values(0, 0, 0, [0xc0, 0, 0, 0, 0, 0, 0, 0x46])
+    );
+}
+
+#[test]
+fn a_c_caller_reaches_the_methods_through_the_vtable() {
+    let (object, _drops) = new_counter();
+    let this = object.as_raw();
+
+    // SAFETY: `this` is a valid interface pointer of `ICounter`.
+    let vtable = unsafe { *this.cast::<*const ICounterVtbl>() };
+    let mut value = 0_u32;
+    // SAFETY: The vtable is the vtable of the object and `value` is a local value.
+    let result = unsafe { ((*vtable).GetValue)(this, &raw mut value) };
+    assert!(result.is_ok());
+    assert_eq!(value, 10);
+
+    // SAFETY: The vtable is the vtable of the object.
+    let next = unsafe { ((*vtable).Increment)(this) };
+    assert_eq!(next, 11);
+
+    // The same call through the safe wrapper gives the same answer.
+    // SAFETY: The object is alive.
+    let after = unsafe { object.Increment() };
+    assert_eq!(after, 12);
+}
+
+#[test]
+fn a_c_caller_reaches_the_second_interface_through_its_own_vtable() {
+    let (object, _drops) = new_counter();
+    let (result, raw) = {
+        // SAFETY: The object is alive.
+        unsafe { raw_query(object.as_raw(), &INamed::IID) }
+    };
+    assert!(result.is_ok());
+    assert!(!raw.is_null());
+    // The second interface pointer is not the first one. The `this` adjustment moved it.
+    assert_ne!(raw, object.as_raw());
+    assert_eq!(
+        raw as usize - object.as_raw() as usize,
+        size_of::<*const c_void>()
+    );
+
+    // SAFETY: `raw` is a valid interface pointer of `INamed`.
+    let named = unsafe { ComPtr::<INamed>::from_raw(raw) }.unwrap();
+    let mut name: *const u8 = ptr::null();
+    // SAFETY: The object is alive and `name` is a local value.
+    let result = unsafe { named.GetName(&raw mut name) };
+    assert!(result.is_ok());
+    // SAFETY: The method gives the address of a static C string.
+    let text = unsafe { core::ffi::CStr::from_ptr(name.cast::<core::ffi::c_char>()) };
+    assert_eq!(text.to_bytes(), b"counter");
+}
+
+#[test]
+fn query_interface_answers_self_the_ancestor_and_the_second_interface() {
+    let (object, _drops) = new_counter();
+    let this = object.as_raw();
+
+    for iid in [ICounter::IID, IUnknown::IID] {
+        // SAFETY: `this` is a valid COM interface pointer.
+        let (result, raw) = unsafe { raw_query(this, &iid) };
+        assert!(result.is_ok());
+        assert_eq!(raw, this);
+        // SAFETY: `QueryInterface` added the reference that this `ComPtr` owns.
+        drop(unsafe { ComPtr::<ICounter>::from_raw(raw) });
+    }
+
+    // SAFETY: `this` is a valid COM interface pointer.
+    let (result, raw) = unsafe { raw_query(this, &INamed::IID) };
+    assert!(result.is_ok());
+    // SAFETY: `QueryInterface` added the reference that this `ComPtr` owns.
+    drop(unsafe { ComPtr::<INamed>::from_raw(raw) });
+}
+
+#[test]
+fn query_interface_refuses_an_unknown_interface_and_a_null_out_pointer() {
+    let (object, _drops) = new_counter();
+    let this = object.as_raw();
+
+    let unknown_iid = GUID::from_values(0xdead_beef, 0, 0, [0; 8]);
+    // SAFETY: `this` is a valid COM interface pointer.
+    let (result, raw) = unsafe { raw_query(this, &unknown_iid) };
+    assert_eq!(result, E_NOINTERFACE);
+    assert!(raw.is_null());
+
+    // SAFETY: `this` is a valid COM interface pointer. A null out-pointer is the case
+    // that the test checks.
+    let result = unsafe {
+        let vtable = *this.cast::<*const IUnknownVtbl>();
+        ((*vtable).QueryInterface)(this, &raw const unknown_iid, ptr::null_mut())
+    };
+    assert_eq!(result, E_POINTER);
+}
+
+#[test]
+fn the_identity_rule_holds_from_every_interface() {
+    let (object, _drops) = new_counter();
+    let named = object.cast::<INamed>().unwrap();
+    assert_ne!(named.as_raw(), object.as_raw());
+
+    let from_counter = object.cast::<IUnknown>().unwrap();
+    let from_named = named.cast::<IUnknown>().unwrap();
+    assert_eq!(from_counter.as_raw(), from_named.as_raw());
+    assert_eq!(from_counter.as_raw(), object.as_raw());
+}
+
+#[test]
+fn the_counts_and_the_destruction_are_correct() {
+    let (object, drops) = new_counter();
+    let this = object.as_raw();
+    // SAFETY: `this` is a valid COM interface pointer of a live object.
+    let vtable = unsafe { *this.cast::<*const IUnknownVtbl>() };
+
+    // SAFETY: The object is alive and this call owns a reference.
+    assert_eq!(unsafe { ((*vtable).AddRef)(this) }, 2);
+    // SAFETY: The object is alive and this call owns a reference.
+    assert_eq!(unsafe { ((*vtable).AddRef)(this) }, 3);
+    // SAFETY: This call removes one of the references that the test owns.
+    assert_eq!(unsafe { ((*vtable).Release)(this) }, 2);
+    // SAFETY: This call removes one of the references that the test owns.
+    assert_eq!(unsafe { ((*vtable).Release)(this) }, 1);
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+
+    drop(object);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn a_clone_adds_a_reference_and_a_drop_removes_it() {
+    let (object, drops) = new_counter();
+    let second = object.clone();
+    assert_eq!(second.public_count_of::<Counter>(), Some(2));
+    drop(second);
+    assert_eq!(object.public_count_of::<Counter>(), Some(1));
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+    drop(object);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn as_impl_answers_only_for_an_object_of_this_process() {
+    let (object, _drops) = new_counter();
+    let value = object.as_impl::<Counter>().unwrap();
+    assert_eq!(value.value.load(Ordering::Relaxed), 10);
+
+    // A foreign object has a vtable that this process did not make.
+    let foreign_vtable: *const c_void = ptr::from_ref(&FOREIGN_VTABLE).cast();
+    let mut foreign_object = foreign_vtable;
+    let raw: *mut c_void = ptr::from_mut(&mut foreign_object).cast();
+    // SAFETY: `raw` refers to a place whose first field is a vtable pointer.
+    let found = unsafe { cppvtable::object_of_raw::<Counter>(raw) };
+    assert!(found.is_none());
+}
+
+/// A vtable that this process did not make. `as_impl` must not answer for it.
+static FOREIGN_VTABLE: [usize; 8] = [0; 8];

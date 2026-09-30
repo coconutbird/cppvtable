@@ -1,129 +1,114 @@
-//! C++ VTable interop for Rust (MSVC ABI)
+//! The ABI layer: COM and C++ vtables, the object model, and the reference count
+//! policies.
 //!
-//! This crate provides C++ compatible vtable layouts and Rust-side interface metadata.
+//! A frontend implements binary interfaces of another language. The interfaces use
+//! different calling conventions on different targets. This crate owns all of that, so
+//! a frontend has no hand-written vtable and no hand-written shim.
 //!
-//! ## Rust-side RTTI (Runtime Type Information)
+//! The crate has no dependency on `RenderBridge`.
 //!
-//! The proc-macros generate unique interface IDs and interface-offset metadata. This enables:
-//! - Runtime type identification
-//! - Pointer-adjusted casting between interfaces implemented by Rust objects
+//! # Declare an interface
 //!
-//! This metadata is separate from native C++ RTTI and does not interoperate with
-//! `dynamic_cast` or `typeid`. The [`rtti::VTableWithRtti`] helper can manually place
-//! Rust [`rtti::TypeInfo`] at vtable slot -1 when that layout is desired.
+//! ```
+//! use core::ffi::c_void;
+//! use cppvtable::{HRESULT, interface};
 //!
-//! This crate provides two approaches for defining C++ compatible interfaces:
-//!
-//! ## Declarative macros (`decl` module)
-//! ```no_run
-//! use cppvtable::{define_class, define_interface};
-//!
-//! define_interface! {
-//!     interface IAnimal {
-//!         fn speak(&self);
-//!         [5] fn legs(&self) -> i32;  // explicit slot index
-//!     }
-//! }
-//!
-//! define_class! {
-//!     class Dog : IAnimal {
-//!         name: [u8; 32],
-//!     }
+//! #[interface(abi = com, iid = "1c1a0b4f-2a4a-4a1b-9a4a-0f0a0b0c0d01")]
+//! pub unsafe trait IThing {
+//!     /// Give the value of the thing.
+//!     fn GetValue(&self, value: *mut u32) -> HRESULT;
 //! }
 //! ```
 //!
-//! ## Proc-macros (`proc` module)
-//! ```no_run
-//! use cppvtable::proc::{cppvtable, cppvtable_impl};
+//! The macro makes:
 //!
-//! #[cppvtable]
-//! pub trait IAnimal {
-//!     fn speak(&self);
-//!     fn legs(&self) -> i32;
+//! | Item | Function |
+//! | ---- | -------- |
+//! | `IThing` | the interface type. A transparent wrapper of one interface pointer. |
+//! | `IThingVtbl` | the `#[repr(C)]` vtable. The first field is the vtable of the base. |
+//! | `impl Interface for IThing` | `type Vtbl`, `const IID`, `const ANCESTORS`. |
+//! | `impl Deref for IThing` | the base interface, so a `ComPtr` gives the whole chain. |
+//! | `IThingImpl` | the trait of the implementer. Each method takes `&self`. |
+//! | `IThingVtbl::new::<T, SLOT>()` | the builder of a static vtable. |
+//!
+//! # Implement an object
+//!
+//! ```
+//! # use core::ffi::c_void;
+//! # use core::sync::atomic::{AtomicU32, Ordering};
+//! # use cppvtable::{HRESULT, S_OK, interface};
+//! # #[interface(abi = com, iid = "1c1a0b4f-2a4a-4a1b-9a4a-0f0a0b0c0d02")]
+//! # pub unsafe trait IThing {
+//! #     fn GetValue(&self, value: *mut u32) -> HRESULT;
+//! # }
+//! use cppvtable::{ComObject, RefCounted, SingleRefCount, implement};
+//!
+//! #[implement(IThing)]
+//! pub struct Thing {
+//!     value: AtomicU32,
 //! }
 //!
-//! #[repr(C)]
-//! pub struct Dog {
-//!     vtable_i_animal: *const IAnimalVTable,
-//!     name: [u8; 32],
+//! impl RefCounted for Thing {
+//!     type Policy = SingleRefCount;
 //! }
 //!
-//! #[cppvtable_impl(IAnimal)]
-//! impl Dog {
-//!     fn speak(&self) { println!("Woof!"); }
-//!     fn legs(&self) -> i32 { 4 }
+//! impl IThingImpl for Thing {
+//!     fn GetValue(&self, value: *mut u32) -> HRESULT {
+//!         // SAFETY: The caller of the COM method gives a writable place.
+//!         unsafe { *value = self.value.load(Ordering::Relaxed) };
+//!         S_OK
+//!     }
 //! }
+//!
+//! let thing = ComObject::new(Thing { value: AtomicU32::new(7) });
+//! let mut out = 0_u32;
+//! // SAFETY: The pointer refers to a local value.
+//! let result = unsafe { thing.GetValue(&raw mut out) };
+//! assert!(result.is_ok());
+//! assert_eq!(out, 7);
 //! ```
 //!
-//! ## Feature comparison
+//! # The object model
 //!
-//! | Feature | Declarative | Proc-macro |
-//! |---------|-------------|------------|
-//! | Slot indices `[N]` / `#[slot(N)]` | ✅ | ✅ |
-//! | thiscall (x86) | ✅ | ✅ |
-//! | Clean Rust syntax | ❌ | ✅ |
-//! | No separate crate | ✅ | N/A |
-//! | RTTI support | ✅ | ✅ |
-//! | Multiple inheritance | ✅ | ✅ |
+//! [`ComObject<T>`] is the allocation: one vtable pointer for each implemented
+//! interface chain, then the counts, then the Rust value. See the module
+//! [`object`](crate::object) for the layout and for the `this` adjustment.
+//!
+//! [`ComPtr<I>`] owns one public reference. [`PrivateRef<T>`] owns one private
+//! reference. [`OwnedObject<T>`] owns a child object that a container destroys.
+//!
+//! # The reference counts
+//!
+//! See the module [`refcount`](crate::refcount) for the rules, the hooks, and a
+//! Direct3D 9 example.
+//!
+//! # The feature `windows-compat`
+//!
+//! With this feature [`GUID`] and [`HRESULT`] are the types of `windows-core`. The two
+//! versions have the same layout and the same constructors, so the rest of the crate
+//! does not change.
 
-pub mod com;
-pub mod decl;
-pub mod rtti;
+pub mod guid;
+pub mod hresult;
+pub mod interface;
+pub mod object;
+pub mod ptr;
+pub mod refcount;
 
-// =============================================================================
-// VTableLayout - Trait for interface inheritance
-// =============================================================================
+pub use cppvtable_macro::{implement, interface};
 
-/// Trait providing vtable layout information for interface inheritance.
-///
-/// This trait is automatically implemented by `#[cppvtable]` for each interface.
-/// It enables `extends(Base)` to inherit from another interface.
-///
-/// # Example
-/// ```ignore
-/// use cppvtable::proc::cppvtable;
-///
-/// #[cppvtable]
-/// pub trait IBase {
-///     fn base_method(&self);
-/// }
-///
-/// #[cppvtable(extends(IBase))]
-/// pub trait IDerived {
-///     fn derived_method(&self);  // Starts at slot 1
-/// }
-/// ```
-pub trait VTableLayout {
-    /// The number of vtable slots used by this interface (including inherited slots).
-    const SLOT_COUNT: usize;
-
-    /// The vtable struct type for this interface.
-    type VTable;
-}
-
-/// Proc-macro approach - re-exports from cppvtable-macro crate
-pub mod proc {
-    pub use cppvtable_macro::{com_implement, com_interface};
-    pub use cppvtable_macro::{cppvtable, cppvtable_impl};
-}
-
-// Re-export paste for use by declarative macros
-#[doc(hidden)]
-pub use paste::paste;
-
-// Re-export common types for macro use
-#[doc(hidden)]
-pub use std::ffi::c_void;
-#[doc(hidden)]
-pub use std::sync::atomic::{Ordering, compiler_fence};
-
-// Re-export RTTI types for macro-generated code
-#[doc(hidden)]
-pub use rtti::{InterfaceInfo, TypeInfo};
-
-// Re-export COM types for macro-generated code
-#[doc(hidden)]
-pub use com::{
-    ComRefCount, E_NOINTERFACE, E_POINTER, GUID, HRESULT, IID_IUNKNOWN, IUnknown, IUnknownVTable,
-    S_OK, make_guid,
+pub use guid::GUID;
+pub use hresult::{
+    E_FAIL, E_INVALIDARG, E_NOINTERFACE, E_NOTIMPL, E_OUTOFMEMORY, E_POINTER, E_UNEXPECTED,
+    HRESULT, S_FALSE, S_OK, hresult,
+};
+pub use interface::{
+    IUnknown, IUnknownVtbl, Interface, VtablePtr, interface_matches, raw_of, unknown_add_ref,
+    unknown_release, vtable_of,
+};
+pub use object::{ComImplement, ComObject, Implements, OwnedObject, interface_of, query_interface};
+pub use ptr::{ComPtr, PrivateRef, object_of_raw};
+pub use refcount::{
+    DualRefCount, DualState, ForwardRefCount, ForwardState, PrivatePolicy, RefCountPolicy,
+    RefCounted, SingleRefCount, SingleState, StandalonePolicy,
 };

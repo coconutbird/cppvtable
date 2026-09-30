@@ -8,7 +8,7 @@
 #![recursion_limit = "512"]
 
 use cpp::cpp;
-use cppvtable::proc::{cppvtable, cppvtable_impl};
+use cppvtable::{ForwardRefCount, RefCounted, implement, interface};
 use std::ffi::c_void;
 
 #[cfg(test)]
@@ -16,9 +16,7 @@ mod multi;
 #[cfg(test)]
 mod single;
 
-// =============================================================================
 // C++ code compiled by MSVC
-// =============================================================================
 
 cpp! {{
     #include <cstdio>
@@ -64,9 +62,7 @@ cpp! {{
         }
     };
 
-    // ==========================================================================
     // Multiple inheritance interfaces and classes
-    // ==========================================================================
 
     class ISwimmer {
     public:
@@ -97,12 +93,13 @@ cpp! {{
     };
 }}
 
-// =============================================================================
 // C++ helper functions
 // Note: These cannot use #[cfg(test)] because cpp_build needs to see them
-// =============================================================================
 
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "compiled for cpp_build and used in tests")
+)]
 fn create_cpp_dog(name: &str) -> *mut c_void {
     let name_ptr = name.as_ptr();
     let name_len = name.len();
@@ -114,28 +111,40 @@ fn create_cpp_dog(name: &str) -> *mut c_void {
     })
 }
 
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "compiled for cpp_build and used in tests")
+)]
 fn create_cpp_cat(lives: i32) -> *mut c_void {
     cpp!(unsafe [lives as "int"] -> *mut c_void as "void*" {
         return new CppCat(lives);
     })
 }
 
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "compiled for cpp_build and used in tests")
+)]
 fn cpp_call_legs(animal: *mut c_void) -> i32 {
     cpp!(unsafe [animal as "ICppAnimal*"] -> i32 as "int" {
         return animal->legs();
     })
 }
 
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "compiled for cpp_build and used in tests")
+)]
 fn delete_cpp_animal(animal: *mut c_void) {
     cpp!(unsafe [animal as "ICppAnimal*"] {
         delete animal;
-    })
+    });
 }
 
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "compiled for cpp_build and used in tests")
+)]
 fn cpp_call_rust_legs(rust_animal: *mut c_void) -> i32 {
     cpp!(unsafe [rust_animal as "ICppAnimal*"] -> i32 as "int" {
         return rust_animal->legs();
@@ -143,128 +152,149 @@ fn cpp_call_rust_legs(rust_animal: *mut c_void) -> i32 {
 }
 
 // Multiple inheritance helpers
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "compiled for cpp_build and used in tests")
+)]
 fn create_cpp_duck(speed: i32) -> *mut c_void {
     cpp!(unsafe [speed as "int"] -> *mut c_void as "void*" {
         return new CppDuck(speed);
     })
 }
 
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "compiled for cpp_build and used in tests")
+)]
 fn delete_cpp_duck(duck: *mut c_void) {
     cpp!(unsafe [duck as "CppDuck*"] {
         delete duck;
-    })
+    });
 }
 
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "compiled for cpp_build and used in tests")
+)]
 fn cpp_duck_as_swimmer(duck: *mut c_void) -> *mut c_void {
     cpp!(unsafe [duck as "CppDuck*"] -> *mut c_void as "void*" {
         return static_cast<ISwimmer*>(duck);
     })
 }
 
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "compiled for cpp_build and used in tests")
+)]
 fn cpp_duck_as_flyer(duck: *mut c_void) -> *mut c_void {
     cpp!(unsafe [duck as "CppDuck*"] -> *mut c_void as "void*" {
         return static_cast<IFlyer*>(duck);
     })
 }
 
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "compiled for cpp_build and used in tests")
+)]
 fn cpp_call_swim_speed(swimmer: *mut c_void) -> i32 {
     cpp!(unsafe [swimmer as "ISwimmer*"] -> i32 as "int" {
         return swimmer->swim_speed();
     })
 }
 
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "compiled for cpp_build and used in tests")
+)]
 fn cpp_call_fly_speed(flyer: *mut c_void) -> i32 {
     cpp!(unsafe [flyer as "IFlyer*"] -> i32 as "int" {
         return flyer->fly_speed();
     })
 }
 
-// =============================================================================
-// Rust interface matching C++ ICppAnimal
-// =============================================================================
+// Rust interfaces matching the C++ classes
 
-#[cppvtable]
-pub trait IAnimal {
+#[interface(abi = cpp)]
+unsafe trait IAnimal {
     fn speak(&self);
     fn legs(&self) -> i32;
 }
 
-// =============================================================================
-// Multiple inheritance interfaces
-// =============================================================================
-
-#[cppvtable]
-pub trait ISwimmer {
+#[interface(abi = cpp)]
+unsafe trait ISwimmer {
     fn swim_speed(&self) -> i32;
     fn swim(&self);
 }
 
-#[cppvtable]
-pub trait IFlyer {
+#[interface(abi = cpp)]
+unsafe trait IFlyer {
     fn fly_speed(&self) -> i32;
     fn fly(&self);
 }
 
-/// Rust Duck implementing both ISwimmer and IFlyer
-#[repr(C)]
-pub struct Duck {
-    vtable_i_swimmer: *const ISwimmerVTable,
-    vtable_i_flyer: *const IFlyerVTable,
-    pub speed: i32,
+// Rust objects exposed through C++ interfaces
+
+#[implement(ISwimmer, IFlyer)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used only by the C++ interop tests")
+)]
+struct Duck {
+    speed: i32,
 }
 
-#[cppvtable_impl(ISwimmer)]
-impl Duck {
+impl RefCounted for Duck {
+    type Policy = ForwardRefCount;
+}
+
+impl ISwimmerImpl for Duck {
     fn swim_speed(&self) -> i32 {
         self.speed
     }
+
     fn swim(&self) {
         println!("Duck swimming at {}", self.speed);
     }
 }
 
-#[cppvtable_impl(IFlyer)]
-impl Duck {
+impl IFlyerImpl for Duck {
     fn fly_speed(&self) -> i32 {
         self.speed * 2
     }
+
     fn fly(&self) {
         println!("Duck flying at {}", self.speed * 2);
     }
 }
 
 impl Duck {
-    pub fn new(speed: i32) -> Self {
-        Duck {
-            vtable_i_swimmer: Self::VTABLE_I_SWIMMER,
-            vtable_i_flyer: Self::VTABLE_I_FLYER,
-            speed,
-        }
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used only by the C++ interop tests")
+    )]
+    fn new(speed: i32) -> Self {
+        Self { speed }
     }
 }
 
-// =============================================================================
-// Single inheritance structs
-// =============================================================================
-
-#[repr(C)]
-pub struct Dog {
-    vtable_i_animal: *const IAnimalVTable,
-    pub name: [u8; 32],
+#[implement(IAnimal)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used only by the C++ interop tests")
+)]
+struct Dog {
+    name: [u8; 32],
 }
 
-#[cppvtable_impl(IAnimal)]
-impl Dog {
+impl RefCounted for Dog {
+    type Policy = ForwardRefCount;
+}
+
+impl IAnimalImpl for Dog {
     fn speak(&self) {
         let name_len = self.name.iter().position(|&b| b == 0).unwrap_or(32);
         let name = std::str::from_utf8(&self.name[..name_len]).unwrap_or("???");
-        println!("{} says: Woof!", name);
+        println!("{name} says: Woof!");
     }
 
     fn legs(&self) -> i32 {
@@ -273,11 +303,12 @@ impl Dog {
 }
 
 impl Dog {
-    pub fn new(name: &str) -> Self {
-        let mut dog = Dog {
-            vtable_i_animal: Self::VTABLE_I_ANIMAL,
-            name: [0u8; 32],
-        };
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used only by the C++ interop tests")
+    )]
+    fn new(name: &str) -> Self {
+        let mut dog = Self { name: [0_u8; 32] };
         let bytes = name.as_bytes();
         let len = bytes.len().min(31);
         dog.name[..len].copy_from_slice(&bytes[..len]);
@@ -285,14 +316,20 @@ impl Dog {
     }
 }
 
-#[repr(C)]
-pub struct Cat {
-    vtable_i_animal: *const IAnimalVTable,
-    pub lives: i32,
+#[implement(IAnimal)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used only by the C++ interop tests")
+)]
+struct Cat {
+    lives: i32,
 }
 
-#[cppvtable_impl(IAnimal)]
-impl Cat {
+impl RefCounted for Cat {
+    type Policy = ForwardRefCount;
+}
+
+impl IAnimalImpl for Cat {
     fn speak(&self) {
         println!("Cat with {} lives says: Meow!", self.lives);
     }
@@ -303,10 +340,11 @@ impl Cat {
 }
 
 impl Cat {
-    pub fn new(lives: i32) -> Self {
-        Cat {
-            vtable_i_animal: Self::VTABLE_I_ANIMAL,
-            lives,
-        }
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used only by the C++ interop tests")
+    )]
+    fn new(lives: i32) -> Self {
+        Self { lives }
     }
 }

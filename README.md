@@ -1,213 +1,93 @@
 # cppvtable
 
-Rust library for C++ vtable interop with MSVC ABI compatibility.
+Rust ABI support for COM interfaces, C++ vtables, and C tables of function pointers.
 
-Define C++ compatible interfaces and classes in Rust that can:
+`cppvtable` generates interface types, vtables, and object shims from Rust traits. It handles calling conventions, interface inheritance, `this`-pointer adjustment for multiple interfaces, COM identity, and reference-count policies.
 
-- Call methods on C++ objects passed to Rust
-- Be passed to C++ code which can call methods through the vtable
-- Implement COM interfaces with proper IUnknown support
+## Declare an interface
 
-## Features
-
-- **MSVC ABI compatible** - vtable layout matches MSVC C++ compiler
-- **Calling conventions** - `thiscall`/`stdcall` on x86 and the system ABI elsewhere
-- **Explicit slot indices** - `[N] fn method()` syntax for specific vtable slots
-- **Multiple inheritance** - proper this-pointer adjustment
-- **Rust-side RTTI** - `TypeInfo` and `cast_to()` for runtime interface casting
-- **COM support** - `#[com_interface]` and `#[com_implement]` for COM interfaces with auto-generated IUnknown
-- **Two macro approaches** - declarative (`macro_rules!`) and proc-macro
-
-## Limitations
-
-- **No C++ RTTI support** - This crate does not interoperate with C++ native RTTI (`dynamic_cast`, `typeid`). C++ RTTI uses complex ABI-specific structures that vary between MSVC and GCC/Clang. If you need runtime casting of C++ objects, the C++ code should expose its own casting mechanism. The `rtti` module provides Rust-side type info for casting between interfaces on Rust objects only.
-
-## Usage
-
-### COM Interfaces
+Use `#[interface]` with `abi = com`, `cpp`, or `c`:
 
 ```rust
-use cppvtable::com::{ComRefCount, HRESULT, S_OK};
-use cppvtable::proc::{com_interface, com_implement};
+use cppvtable::{HRESULT, interface};
 
-// Define a COM interface (automatically extends IUnknown)
-#[com_interface("12345678-1234-5678-9abc-def012345678")]
-pub trait ICalculator {
-    fn add(&self, a: i32, b: i32) -> i32;
-    fn multiply(&self, a: i32, b: i32) -> i32;
-}
-
-// Implement the interface
-#[repr(C)]
-pub struct Calculator {
-    vtable_i_calculator: *const ICalculatorVTable,
-    ref_count: ComRefCount,
-    base_value: i32,
-}
-
-#[com_implement(ICalculator)]
-impl Calculator {
-    fn add(&self, a: i32, b: i32) -> i32 {
-        self.base_value + a + b
-    }
-    fn multiply(&self, a: i32, b: i32) -> i32 {
-        self.base_value * a * b
-    }
-    // IUnknown methods (query_interface, add_ref, release) are auto-generated
+#[interface(abi = com, iid = "1c1a0b4f-2a4a-4a1b-9a4a-0f0a0b0c0d01")]
+pub unsafe trait IThing {
+    /// Write the value of the thing.
+    fn GetValue(&self, value: *mut u32) -> HRESULT;
 }
 ```
 
-### Proc-Macros (Non-COM)
+COM interfaces require an IID and default to `IUnknown` as their base. C++ interfaces use the C++ method calling convention (`thiscall` on x86, C elsewhere); C interfaces use `extern "C"`. Use `extends(IBase)` to declare an interface base and `#[slot(N)]` for an explicit method slot.
+
+## Implement an interface
+
+Continuing the interface declaration above, mark the object with `#[implement]`, implement the generated `IThingImpl` trait, and choose a reference-count policy:
 
 ```rust
-use cppvtable::proc::{cppvtable, cppvtable_impl};
+use cppvtable::{ComObject, RefCounted, SingleRefCount, S_OK, implement};
 
-#[cppvtable]
-pub trait IAnimal {
-    fn speak(&self);
-    fn legs(&self) -> i32;
+#[implement(IThing)]
+pub struct Thing {
+    value: u32,
 }
 
-#[repr(C)]
-pub struct Dog {
-    vtable_i_animal: *const IAnimalVTable,
-    pub name: [u8; 32],
+impl RefCounted for Thing {
+    type Policy = SingleRefCount;
 }
 
-#[cppvtable_impl(IAnimal)]
-impl Dog {
-    fn speak(&self) {
-        println!("Woof!");
-    }
-    fn legs(&self) -> i32 {
-        4
-    }
-}
-```
-
-### Declarative Macros
-
-```rust
-use cppvtable::{define_interface, define_class};
-
-define_interface! {
-    interface IAnimal {
-        fn speak(&self);
-        fn legs(&self) -> i32;
-    }
-
-    interface IAdvancedAnimal {
-        fn run(&mut self);
-        [5] fn special_method(&self);  // explicit slot index
+impl IThingImpl for Thing {
+    fn GetValue(&self, value: *mut u32) -> HRESULT {
+        // SAFETY: The interface caller provides writable storage.
+        unsafe { *value = self.value };
+        S_OK
     }
 }
 
-define_class! {
-    pub class Dog : IAnimal, IAdvancedAnimal {
-        pub name: [u8; 32],
-    }
+fn main() {
+    let thing = ComObject::new(Thing { value: 7 });
+    let mut value = 0;
+    // SAFETY: `value` is writable storage.
+    let result = unsafe { thing.GetValue(&raw mut value) };
+    assert!(result.is_ok());
+    assert_eq!(value, 7);
 }
 ```
 
-### Consuming C++ Objects
+`ComPtr<I>` owns a public reference when `I` is a COM interface. For `cpp` and `c` interfaces it is only a pointer wrapper: it does not keep a foreign object alive or change a reference count. Borrow a foreign interface pointer with `I::from_raw_ref` while its owner keeps the object alive. `OwnedObject<T>` owns a Rust-allocated object using the forwarding reference-count policy, typically as a child of a container. The `refcount` module provides single, dual, and forwarding policies.
 
-```rust
-use std::ffi::c_void;
+## Build and test
 
-// Pointer from C++ code
-let cpp_animal: *mut c_void = get_cpp_animal();
-
-// Wrap and call methods
-unsafe {
-    let animal = IAnimal::from_ptr_mut(cpp_animal);
-    animal.speak();
-    println!("Legs: {}", animal.legs());
-}
-```
-
-## Feature Comparison
-
-| Feature                | Declarative        | Proc-macro      | COM               |
-| ---------------------- | ------------------ | --------------- | ----------------- |
-| Slot indices           | ✅ `[N] fn method` | ✅ `#[slot(N)]` | ✅ `#[slot(N)]`   |
-| x86 calling convention | `thiscall`         | `thiscall`      | `stdcall`         |
-| `IUnknown` support     | ❌                 | ❌              | ✅ (auto)         |
-| Interface IID          | ❌                 | ❌              | ✅ (GUID)         |
-| Clean Rust syntax      | ❌                 | ✅              | ✅                |
-
-## Project Structure
-
-```
-cppvtable/
-├── .github/
-│   └── workflows/
-│       └── dependencies.yml # Dependency-policy CI
-├── Cargo.toml              # Virtual workspace configuration
-├── deny.toml               # Advisories, licenses, bans, and source policy
-├── examples/
-│   └── cppvtable/          # Standalone C++/Rust example (requires MSVC)
-│       ├── Cargo.toml
-│       ├── build.rs
-│       └── src/
-│           └── main.rs
-└── crates/
-    ├── cppvtable/          # Main library (pure Rust)
-    │   ├── Cargo.toml
-    │   ├── src/
-    │   │   ├── lib.rs      # Re-exports both approaches
-    │   │   ├── decl.rs     # Declarative macros
-    │   │   ├── com.rs      # COM types (GUID, HRESULT, IUnknown)
-    │   │   └── rtti.rs     # Rust-side RTTI for interface casting
-    │   └── tests/          # Rust integration tests
-    ├── cppvtable-macro/    # Proc-macro crate
-    │   ├── Cargo.toml
-    │   └── src/
-    │       └── lib.rs      # #[cppvtable], #[cppvtable_impl], #[com_interface], #[com_implement]
-    └── cppvtable-cpp-tests/ # C++ interop tests (requires MSVC)
-        ├── Cargo.toml
-        ├── build.rs
-        └── src/
-            ├── lib.rs      # C++ classes, helpers, Rust interfaces
-            ├── single.rs   # Single inheritance tests
-            └── multi.rs    # Multiple inheritance tests
-```
-
-## Running the Example
-
-```bash
-cargo run -p cppvtable-example
-```
-
-## Testing
-
-```bash
-# Run all Rust tests (no C++ compiler needed)
+```sh
+# Pure Rust library tests
 cargo test -p cppvtable
 
-# Run C++ interop tests (requires MSVC)
+# C++ interoperability tests and executable example (requires MSVC)
 cargo test -p cppvtable-cpp-tests
+cargo run -p cppvtable-example
 
-# Run all tests
+# Workspace checks
 cargo test --workspace
-
-# Audit the complete dependency graph
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
 cargo deny check
 ```
 
-**Test coverage includes:**
+The C++ interoperability tests cover Rust-to-C++ and C++-to-Rust calls, single and multiple inheritance, and secondary-interface pointer adjustment against MSVC's ABI.
 
-- Single & multiple inheritance
-- This-pointer adjustment for secondary interfaces
-- Rust calling C++ objects, C++ calling Rust objects
-- TypeInfo/RTTI: `implements()`, `cast_to()`, null for unknown interfaces
-- VTable layout verification against MSVC
-- COM interfaces: IID generation, QueryInterface, AddRef/Release, interface inheritance
+## Workspace layout
+
+- `crates/cppvtable`: public ABI, object, pointer, and reference-count APIs, with Rust integration tests.
+- `crates/cppvtable-macro`: the `#[interface]` and `#[implement]` procedural macros.
+- `crates/cppvtable-cpp-tests`: MSVC C++ interoperability tests.
+- `examples/cppvtable`: a bidirectional C++/Rust interface example.
 
 ## Requirements
 
-- Rust 2024 edition
-- MSVC toolchain (for `cppvtable-example` and `cppvtable-cpp-tests`)
+- Rust 1.85 or later (edition 2024).
+- MSVC for the C++ test package and example.
 
 ## License
 
-MIT
+MIT.
+

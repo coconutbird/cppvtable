@@ -1,64 +1,61 @@
-//! Experimenting with C++ vtable compatibility in Rust
+//! A bidirectional C++ ABI example for `cppvtable`.
 //!
-//! This demonstrates two approaches:
-//! 1. Declarative macros: `define_interface!` and `define_class!`
-//! 2. Proc-macros: `#[cppvtable]` and `#[cppvtable_impl]`
-//!
-//! Also includes C++ interop tests using the `cpp` crate to verify
-//! vtable layout compatibility with actual MSVC-compiled C++ code.
-
-#![allow(dead_code)]
-
-// Use the cppvtable crate from crates/cppvtable
-// Declarative macros are #[macro_export] so they're at crate root
-use cppvtable::{define_class, define_interface};
+//! Rust declares the C++ interface with `#[interface(abi = cpp)]`. The inline C++ code
+//! implements it once in C++ and also calls a Rust object that implements the same
+//! interface. `cpp_build` compiles the inline C++ with the example.
 
 use cpp::cpp;
+use cppvtable::{ForwardRefCount, OwnedObject, RefCounted, implement, interface};
 use std::ffi::c_void;
 use std::io::{self, Write};
 
-// =============================================================================
-// C++ INTEROP: Define C++ classes and test vtable compatibility
-// =============================================================================
+/// The C++ interface shared by the C++ and Rust objects below.
+#[interface(abi = cpp)]
+unsafe trait IAnimal {
+    fn speak(&self);
+    fn legs(&self) -> i32;
+}
 
-// This block defines C++ code that will be compiled by MSVC
+#[implement(IAnimal)]
+struct RustDog {
+    name: String,
+}
+
+impl RefCounted for RustDog {
+    type Policy = ForwardRefCount;
+}
+
+impl IAnimalImpl for RustDog {
+    fn speak(&self) {
+        println!("RustDog '{}' says: Woof from Rust!", self.name);
+    }
+
+    fn legs(&self) -> i32 {
+        4
+    }
+}
+
 cpp! {{
+    #include <cstddef>
     #include <cstdio>
-    #include <cstring>
+    #include <string>
 
-    // Pure virtual interface - should match our Rust IAnimal layout
-    class ICppAnimal {
+    // Keep this method order and signature in sync with the Rust interface above.
+    // There is intentionally no virtual destructor: it would add another vtable slot.
+    class IAnimal {
     public:
         virtual void speak() = 0;
         virtual int legs() = 0;
     };
 
-    // Concrete C++ implementation
-    class CppDog : public ICppAnimal {
-    public:
-        char name[32];
+    class CppDog final : public IAnimal {
+        std::string name;
 
-        CppDog(const char* n) {
-            strncpy_s(name, sizeof(name), n, _TRUNCATE);
-        }
+    public:
+        CppDog(const char* name, std::size_t length) : name(name, length) {}
 
         void speak() override {
-            printf("CppDog '%s' says: Woof from C++!\n", name);
-        }
-
-        int legs() override {
-            return 4;
-        }
-    };
-
-    class CppCat : public ICppAnimal {
-    public:
-        int lives;
-
-        CppCat(int l) : lives(l) {}
-
-        void speak() override {
-            printf("CppCat with %d lives says: Meow from C++!\n", lives);
+            std::printf("CppDog '%s' says: Woof from C++!\n", name.c_str());
         }
 
         int legs() override {
@@ -67,569 +64,51 @@ cpp! {{
     };
 }}
 
-/// Create a C++ CppDog instance and return as opaque pointer
 fn create_cpp_dog(name: &str) -> *mut c_void {
     let name_ptr = name.as_ptr();
     let name_len = name.len();
     cpp!(unsafe [name_ptr as "const char*", name_len as "size_t"] -> *mut c_void as "void*" {
-        // Copy name to null-terminated buffer
-        char buf[32] = {0};
-        size_t copy_len = name_len < 31 ? name_len : 31;
-        memcpy(buf, name_ptr, copy_len);
-        return new CppDog(buf);
+        return new CppDog(name_ptr, name_len);
     })
 }
 
-/// Create a C++ CppCat instance and return as opaque pointer
-fn create_cpp_cat(lives: i32) -> *mut c_void {
-    cpp!(unsafe [lives as "int"] -> *mut c_void as "void*" {
-        return new CppCat(lives);
-    })
+unsafe fn delete_cpp_dog(animal: *mut c_void) {
+    cpp!(unsafe [animal as "IAnimal*"] {
+        // This helper only receives the CppDog allocated by `create_cpp_dog`.
+        delete static_cast<CppDog*>(animal);
+    });
 }
 
-/// Call speak() on a C++ ICppAnimal through its vtable (C++ side)
-fn cpp_call_speak(animal: *mut c_void) {
-    cpp!(unsafe [animal as "ICppAnimal*"] {
+unsafe fn call_cpp_animal(animal: *mut c_void) -> i32 {
+    cpp!(unsafe [animal as "IAnimal*"] -> i32 as "int" {
         animal->speak();
-        fflush(stdout);
-    })
-}
-
-/// Call legs() on a C++ ICppAnimal through its vtable (C++ side)
-fn cpp_call_legs(animal: *mut c_void) -> i32 {
-    cpp!(unsafe [animal as "ICppAnimal*"] -> i32 as "int" {
+        std::fflush(stdout);
         return animal->legs();
     })
 }
 
-/// Delete a C++ ICppAnimal
-fn delete_cpp_animal(animal: *mut c_void) {
-    cpp!(unsafe [animal as "ICppAnimal*"] {
-        delete animal;
-    })
-}
-
-/// Have C++ call through a Rust-provided vtable pointer
-/// This tests that our Rust vtable layout matches C++ expectations
-fn cpp_call_rust_animal(rust_animal: *mut c_void) {
-    cpp!(unsafe [rust_animal as "ICppAnimal*"] {
-        printf("C++ calling Rust object through vtable:\n");
-        printf("    ");
-        rust_animal->speak();
-        printf("    legs() returned: %d\n", rust_animal->legs());
-        fflush(stdout);
-    })
-}
-
-// =============================================================================
-// APPROACH 1: Declarative macros (define_interface! / cpp_class!)
-// =============================================================================
-
-// Define an interface using the declarative macro
-define_interface! {
-    interface IRunnable {
-        fn run(&mut self);
-        fn stop(&mut self);
-    }
-}
-
-// Define a class implementing the interface
-define_class! {
-    pub class Runner : IRunnable {
-        pub speed: f32,
-        pub running: bool,
-    }
-}
-
-// Implement the IRunnable interface for Runner
-#[cppvtable::proc::cppvtable_impl(IRunnable)]
-impl Runner {
-    fn run(&mut self) {
-        self.running = true;
-        println!("Runner running at speed {}", self.speed);
-    }
-
-    fn stop(&mut self) {
-        self.running = false;
-        println!("Runner stopped");
-    }
-}
-
-impl Runner {
-    pub fn new(speed: f32) -> Self {
-        Runner {
-            vtable_i_runnable: Self::VTABLE_I_RUNNABLE,
-            speed,
-            running: false,
-        }
-    }
-}
-
-// =============================================================================
-// APPROACH 2: Proc-macros (#[cppvtable] / #[cppvtable_impl])
-// =============================================================================
-
-use cppvtable::proc::{cppvtable, cppvtable_impl};
-
-/// Define a C++ interface using proc-macro
-#[cppvtable]
-pub trait IAnimal {
-    fn speak(&self);
-    fn legs(&self) -> i32;
-}
-
-/// A Dog struct that will implement IAnimal
-#[repr(C)]
-pub struct Dog {
-    vtable_i_animal: *const IAnimalVTable,
-    pub name: [u8; 32],
-}
-
-/// Implement the IAnimal interface for Dog
-#[cppvtable_impl(IAnimal)]
-impl Dog {
-    fn speak(&self) {
-        let name_len = self.name.iter().position(|&b| b == 0).unwrap_or(32);
-        let name = std::str::from_utf8(&self.name[..name_len]).unwrap_or("???");
-        println!("{} says: Woof!", name);
-    }
-
-    fn legs(&self) -> i32 {
-        4
-    }
-}
-
-impl Dog {
-    pub fn new(name: &str) -> Self {
-        let mut dog = Dog {
-            vtable_i_animal: Self::VTABLE_I_ANIMAL,
-            name: [0u8; 32],
-        };
-        let bytes = name.as_bytes();
-        let len = bytes.len().min(31);
-        dog.name[..len].copy_from_slice(&bytes[..len]);
-        dog
-    }
-
-    pub fn as_interface(&self) -> &IAnimal {
-        unsafe { &*(self as *const Dog as *const IAnimal) }
-    }
-}
-
-/// Cat also implements IAnimal
-#[repr(C)]
-pub struct Cat {
-    vtable_i_animal: *const IAnimalVTable,
-    pub lives: i32,
-}
-
-#[cppvtable_impl(IAnimal)]
-impl Cat {
-    fn speak(&self) {
-        println!("Cat with {} lives says: Meow!", self.lives);
-    }
-
-    fn legs(&self) -> i32 {
-        4
-    }
-}
-
-impl Cat {
-    pub fn new(lives: i32) -> Self {
-        Cat {
-            vtable_i_animal: Self::VTABLE_I_ANIMAL,
-            lives,
-        }
-    }
-
-    pub fn as_interface(&self) -> &IAnimal {
-        unsafe { &*(self as *const Cat as *const IAnimal) }
-    }
-}
-
-// =============================================================================
-// Cached metrics interface (lazy computation pattern)
-// =============================================================================
-
-#[cppvtable]
-pub trait ICachedMetrics {
-    fn destructor(&mut self, flags: u8) -> *mut c_void;
-    fn get_metric(&mut self, metric_type: i32, param: i32, confidence_out: *mut f32) -> f32;
-    fn compute_metric(&mut self, metric_type: i32, param: i32) -> i32;
-}
-
-const METRIC_NOT_COMPUTED: f32 = f32::MIN;
-
-#[repr(C)]
-pub struct CachedMetrics {
-    vtable_i_cached_metrics: *const ICachedMetricsVTable,
-    pub values: [f32; 2],
-    pub confidence: [f32; 2],
-}
-
-#[cppvtable_impl(ICachedMetrics)]
-impl CachedMetrics {
-    fn destructor(&mut self, flags: u8) -> *mut c_void {
-        println!("CachedMetrics destructor (flags: {})", flags);
-        self as *mut CachedMetrics as *mut c_void
-    }
-
-    fn get_metric(&mut self, metric_type: i32, param: i32, confidence_out: *mut f32) -> f32 {
-        if !(0..2).contains(&metric_type) {
-            return 0.0;
-        }
-        let idx = metric_type as usize;
-        if self.values[idx] == METRIC_NOT_COMPUTED {
-            self.compute_metric(metric_type, param);
-        }
-        if !confidence_out.is_null() {
-            unsafe { *confidence_out = self.confidence[idx] };
-        }
-        self.values[idx]
-    }
-
-    fn compute_metric(&mut self, metric_type: i32, _param: i32) -> i32 {
-        if !(0..2).contains(&metric_type) {
-            return metric_type;
-        }
-        let idx = metric_type as usize;
-        self.values[idx] = 0.85;
-        self.confidence[idx] = 1.0;
-        metric_type
-    }
-}
-
-impl Default for CachedMetrics {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl CachedMetrics {
-    pub fn new() -> Self {
-        CachedMetrics {
-            vtable_i_cached_metrics: Self::VTABLE_I_CACHED_METRICS,
-            values: [METRIC_NOT_COMPUTED; 2],
-            confidence: [1.0; 2],
-        }
-    }
-}
-
-// =============================================================================
-// TEST: #[slot(N)] attribute for explicit vtable slot indices
-// =============================================================================
-
-/// Interface with explicit slot indices - slots 0, 1, 5, 6
-#[cppvtable]
-pub trait ISlotTest {
-    fn method_at_0(&self) -> i32; // slot 0
-    fn method_at_1(&self) -> i32; // slot 1
-    #[slot(5)]
-    fn method_at_5(&self) -> i32; // slot 5 (slots 2-4 are reserved)
-    fn method_at_6(&self) -> i32; // slot 6
-}
-
-#[repr(C)]
-pub struct SlotTester {
-    vtable_i_slot_test: *const ISlotTestVTable,
-}
-
-#[cppvtable_impl(ISlotTest)]
-impl SlotTester {
-    fn method_at_0(&self) -> i32 {
-        0
-    }
-    fn method_at_1(&self) -> i32 {
-        1
-    }
-    #[slot(5)]
-    fn method_at_5(&self) -> i32 {
-        5
-    }
-    fn method_at_6(&self) -> i32 {
-        6
-    }
-}
-
-impl Default for SlotTester {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl SlotTester {
-    pub fn new() -> Self {
-        SlotTester {
-            vtable_i_slot_test: Self::VTABLE_I_SLOT_TEST,
-        }
-    }
-}
-
-// =============================================================================
-// TEST: Multiple inheritance
-// =============================================================================
-
-/// Interface for things that can swim
-#[cppvtable]
-pub trait ISwimmer {
-    fn swim(&self);
-    fn swim_speed(&self) -> f32;
-}
-
-/// Interface for things that can fly
-#[cppvtable]
-pub trait IFlyer {
-    fn fly(&self);
-    fn fly_altitude(&self) -> f32;
-}
-
-/// A duck can both swim and fly - multiple inheritance!
-#[repr(C)]
-pub struct Duck {
-    // Multiple vtable pointers - one per interface
-    vtable_i_swimmer: *const ISwimmerVTable,
-    vtable_i_flyer: *const IFlyerVTable,
-    pub name: [u8; 16],
-}
-
-// Implement ISwimmer for Duck
-#[cppvtable_impl(ISwimmer)]
-impl Duck {
-    fn swim(&self) {
-        let name = std::str::from_utf8(&self.name)
-            .unwrap_or("?")
-            .trim_end_matches('\0');
-        println!("{} is swimming!", name);
-    }
-    fn swim_speed(&self) -> f32 {
-        2.5
-    }
-}
-
-// Implement IFlyer for Duck (separate impl block)
-#[cppvtable_impl(IFlyer)]
-impl Duck {
-    fn fly(&self) {
-        let name = std::str::from_utf8(&self.name)
-            .unwrap_or("?")
-            .trim_end_matches('\0');
-        println!("{} is flying!", name);
-    }
-    fn fly_altitude(&self) -> f32 {
-        100.0
-    }
-}
-
-impl Duck {
-    pub fn new(name: &str) -> Self {
-        let mut duck = Duck {
-            vtable_i_swimmer: Self::VTABLE_I_SWIMMER,
-            vtable_i_flyer: Self::VTABLE_I_FLYER,
-            name: [0u8; 16],
-        };
-        let bytes = name.as_bytes();
-        let len = bytes.len().min(15);
-        duck.name[..len].copy_from_slice(&bytes[..len]);
-        duck
-    }
-
-    /// Cast to ISwimmer (primary interface at offset 0)
-    pub fn as_swimmer(&self) -> &ISwimmer {
-        unsafe { &*(self as *const Self as *const ISwimmer) }
-    }
-
-    /// Cast to IFlyer (secondary interface - requires this-adjustment)
-    pub fn as_flyer(&self) -> &IFlyer {
-        unsafe {
-            let ptr =
-                (self as *const Self as *const u8).add(std::mem::offset_of!(Self, vtable_i_flyer));
-            &*(ptr as *const IFlyer)
-        }
-    }
-}
-
 fn main() {
-    println!("=== C++ VTable Experiment ===\n");
+    println!("--- Rust calling a C++ implementation ---");
+    let cpp_dog = create_cpp_dog("Max");
+    let _ = io::stdout().flush();
+    // SAFETY: `cpp_dog` is a live pointer to the matching C++ `IAnimal` vtable.
+    let cpp_dog_ref = unsafe { IAnimal::from_raw_ref(&cpp_dog) };
+    // SAFETY: The C++ object is alive and its virtual methods obey this interface.
+    let cpp_legs = unsafe {
+        cpp_dog_ref.speak();
+        cpp_dog_ref.legs()
+    };
+    println!("Rust sees the C++ dog's legs: {cpp_legs}");
+    // SAFETY: This pointer came from `create_cpp_dog` and has not been deleted yet.
+    unsafe { delete_cpp_dog(cpp_dog) };
 
-    // =========================================================================
-    // TEST 1: Rust calling C++ objects through vtable
-    // =========================================================================
-    println!("--- TEST 1: Rust consuming C++ objects ---");
-    println!("Creating C++ objects and calling through Rust's from_ptr():\n");
-
-    unsafe {
-        // Create C++ objects
-        let cpp_dog = create_cpp_dog("Max");
-        let cpp_cat = create_cpp_cat(7);
-
-        // Call through C++ side (baseline - this definitely works)
-        println!("Calling from C++ side (baseline):");
-        let _ = io::stdout().flush();
-        cpp_call_speak(cpp_dog);
-        cpp_call_speak(cpp_cat);
-        println!("  CppDog legs: {}", cpp_call_legs(cpp_dog));
-        println!("  CppCat legs: {}", cpp_call_legs(cpp_cat));
-
-        // Now the real test: call through Rust's from_ptr!
-        // This only works if our vtable layout matches C++
-        println!("\nCalling from Rust side via from_ptr() - THIS PROVES LAYOUT MATCH:");
-        let dog_ref = IAnimal::from_ptr_mut(cpp_dog);
-        let cat_ref = IAnimal::from_ptr_mut(cpp_cat);
-
-        print!("  ");
-        dog_ref.speak();
-        print!("  ");
-        cat_ref.speak();
-        println!("  Rust sees CppDog legs: {}", dog_ref.legs());
-        println!("  Rust sees CppCat legs: {}", cat_ref.legs());
-
-        // Cleanup
-        delete_cpp_animal(cpp_dog);
-        delete_cpp_animal(cpp_cat);
-    }
-
-    // =========================================================================
-    // TEST 2: C++ calling Rust objects through vtable
-    // =========================================================================
-    println!("\n--- TEST 2: C++ consuming Rust objects ---");
-    println!("Creating Rust objects and passing to C++ for vtable calls:\n");
-
-    let rust_dog = Dog::new("Buddy");
-    let rust_cat = Cat::new(9);
-
-    // Pass Rust objects to C++ - C++ will call through the vtable
-    // This only works if our Rust vtable layout matches what C++ expects
-    {
-        let dog_ptr = &rust_dog as *const Dog as *mut c_void;
-        let cat_ptr = &rust_cat as *const Cat as *mut c_void;
-
-        println!("C++ calling Rust Dog:");
-        let _ = io::stdout().flush();
-        cpp_call_rust_animal(dog_ptr);
-
-        println!("\nC++ calling Rust Cat:");
-        let _ = io::stdout().flush();
-        cpp_call_rust_animal(cat_ptr);
-    }
-
-    // =========================================================================
-    // Original Rust-only tests
-    // =========================================================================
-    println!("\n--- Rust-only tests (proc-macro approach) ---");
-
-    println!("Direct calls:");
-    rust_dog.speak();
-    rust_cat.speak();
-
-    println!("\nPolymorphic calls through IAnimal:");
-    let animals: [&IAnimal; 2] = [rust_dog.as_interface(), rust_cat.as_interface()];
-    for animal in animals {
-        unsafe {
-            let animal = std::ptr::from_ref(animal).cast_mut().as_mut().unwrap();
-            animal.speak();
-            println!("  Legs: {}", animal.legs());
-        }
-    }
-
-    // Cached metrics (lazy computation pattern)
-    println!("\n--- Cached metrics example ---");
-    let mut metrics = CachedMetrics::new();
-    let mut conf: f32 = 0.0;
-    let value = metrics.get_metric(0, 0, &mut conf);
-    println!("  Metric 0: {} (confidence: {})", value, conf);
-
-    // Test #[slot(N)] attribute
-    println!("\n--- Slot index test (proc-macro) ---");
-    let slot_tester = SlotTester::new();
-    // Verify vtable has correct size: 7 slots (0,1,2,3,4,5,6) * 8 bytes = 56 bytes on x64
-    let vtable_size = std::mem::size_of::<ISlotTestVTable>();
-    let ptr_size = std::mem::size_of::<*const ()>();
-    let expected_slots = 7; // slots 0-6
-    let expected_size = expected_slots * ptr_size;
-    println!(
-        "  ISlotTestVTable size: {} bytes ({} slots)",
-        vtable_size,
-        vtable_size / ptr_size
-    );
-    assert_eq!(
-        vtable_size, expected_size,
-        "VTable should have 7 slots (0-6)"
-    );
-
-    // Call methods through the interface to verify they work
-    unsafe {
-        let iface = &*(&slot_tester as *const SlotTester as *const ISlotTest);
-        let iface = std::ptr::from_ref(iface).cast_mut().as_mut().unwrap();
-        assert_eq!(iface.method_at_0(), 0, "method_at_0 should return 0");
-        assert_eq!(iface.method_at_1(), 1, "method_at_1 should return 1");
-        assert_eq!(iface.method_at_5(), 5, "method_at_5 should return 5");
-        assert_eq!(iface.method_at_6(), 6, "method_at_6 should return 6");
-    }
-    println!("  All slot methods called correctly!");
-
-    // =========================================================================
-    // TEST: Multiple inheritance
-    // =========================================================================
-    println!("\n--- Multiple inheritance test ---");
-
-    let duck = Duck::new("Donald");
-    println!("Duck struct size: {} bytes", std::mem::size_of::<Duck>());
-    println!(
-        "  vtable_i_swimmer offset: {}",
-        std::mem::offset_of!(Duck, vtable_i_swimmer)
-    );
-    println!(
-        "  vtable_i_flyer offset: {}",
-        std::mem::offset_of!(Duck, vtable_i_flyer)
-    );
-
-    // Direct method calls
-    println!("\nDirect calls:");
-    duck.swim();
-    duck.fly();
-    println!("  swim_speed: {}", duck.swim_speed());
-    println!("  fly_altitude: {}", duck.fly_altitude());
-
-    // Polymorphic calls through interfaces
-    println!("\nPolymorphic calls through ISwimmer:");
-    let swimmer = duck.as_swimmer();
-    let swimmer = unsafe { std::ptr::from_ref(swimmer).cast_mut().as_mut().unwrap() };
-    unsafe {
-        swimmer.swim();
-        println!("  swim_speed via interface: {}", swimmer.swim_speed());
-    }
-
-    println!("\nPolymorphic calls through IFlyer (this-adjusted):");
-    let flyer = duck.as_flyer();
-    let flyer = unsafe { std::ptr::from_ref(flyer).cast_mut().as_mut().unwrap() };
-    unsafe {
-        flyer.fly();
-        println!("  fly_altitude via interface: {}", flyer.fly_altitude());
-    }
-
-    println!("  Multiple inheritance works!");
-
-    // Struct sizes
-    println!("\n=== Struct sizes ===");
-    println!("  Rust Dog: {} bytes", std::mem::size_of::<Dog>());
-    println!("  Rust Cat: {} bytes", std::mem::size_of::<Cat>());
-    println!(
-        "  CachedMetrics: {} bytes",
-        std::mem::size_of::<CachedMetrics>()
-    );
-    println!(
-        "  IAnimalVTable: {} bytes",
-        std::mem::size_of::<IAnimalVTable>()
-    );
-    println!(
-        "  IRunnableVTable: {} bytes",
-        std::mem::size_of::<IRunnableVTable>()
-    );
-    println!(
-        "  ISlotTestVTable: {} bytes ({} slots)",
-        vtable_size,
-        vtable_size / ptr_size
-    );
-
-    println!("\n=== ALL TESTS PASSED - VTABLE LAYOUTS MATCH! ===");
+    println!("\n--- C++ calling a Rust implementation ---");
+    let rust_dog = OwnedObject::new(RustDog {
+        name: "Buddy".to_owned(),
+    });
+    let rust_dog_ptr = rust_dog.as_raw::<IAnimal>();
+    let _ = io::stdout().flush();
+    // SAFETY: The pointer is a live Rust implementation of the shared interface.
+    let rust_legs = unsafe { call_cpp_animal(rust_dog_ptr) };
+    println!("C++ sees the Rust dog's legs: {rust_legs}");
 }
