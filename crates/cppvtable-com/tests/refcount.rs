@@ -9,9 +9,10 @@ use core::ptr;
 use core::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use cppvtable::{
-    ComObject, ComPtr, DualRefCount, ForwardRefCount, IUnknownVtbl, Interface, OwnedObject,
-    PrivateRef, RefCounted, SingleRefCount, implement, interface, interface_of,
+use cppvtable_com::Interface;
+use cppvtable_com::{
+    ComObject, ComPtr, DualRefCount, ForwardRefCount, IUnknownVtbl, OwnedObject, PrivateRef,
+    RefCounted, SingleRefCount, implement, interface, interface_of,
 };
 
 /// A list of the events of the test.
@@ -51,14 +52,15 @@ struct Single {
     log: Arc<Log>,
 }
 
-impl RefCounted for Single {
+// SAFETY: Hooks obey the reference-count contract and all returned pointers stay live.
+unsafe impl RefCounted for Single {
     type Policy = SingleRefCount;
 
-    fn on_first_public_ref(&self) {
+    unsafe fn on_first_public_ref(&self) {
         self.log.push("single:first");
     }
 
-    fn on_last_public_release(&self) {
+    unsafe fn on_last_public_release(&self) {
         self.log.push("single:last");
     }
 }
@@ -82,14 +84,15 @@ struct Dual {
     log: Arc<Log>,
 }
 
-impl RefCounted for Dual {
+// SAFETY: Hooks obey the reference-count contract and all returned pointers stay live.
+unsafe impl RefCounted for Dual {
     type Policy = DualRefCount;
 
-    fn on_first_public_ref(&self) {
+    unsafe fn on_first_public_ref(&self) {
         self.log.push("dual:first");
     }
 
-    fn on_last_public_release(&self) {
+    unsafe fn on_last_public_release(&self) {
         self.log.push("dual:last");
     }
 }
@@ -116,14 +119,15 @@ struct Container {
     children: OnceLock<Vec<OwnedObject<Child>>>,
 }
 
-impl RefCounted for Container {
+// SAFETY: Hooks obey the reference-count contract and all returned pointers stay live.
+unsafe impl RefCounted for Container {
     type Policy = DualRefCount;
 
-    fn on_first_public_ref(&self) {
+    unsafe fn on_first_public_ref(&self) {
         self.log.push("container:first");
     }
 
-    fn on_last_public_release(&self) {
+    unsafe fn on_last_public_release(&self) {
         self.log.push("container:last");
     }
 }
@@ -151,10 +155,11 @@ struct Child {
     log: Arc<Log>,
 }
 
-impl RefCounted for Child {
+// SAFETY: Hooks obey the reference-count contract and all returned pointers stay live.
+unsafe impl RefCounted for Child {
     type Policy = ForwardRefCount;
 
-    fn container(&self) -> Option<ptr::NonNull<c_void>> {
+    unsafe fn container(&self) -> Option<ptr::NonNull<c_void>> {
         ptr::NonNull::new(self.container.load(Ordering::Relaxed))
     }
 }
@@ -352,7 +357,8 @@ fn a_child_sends_its_counts_to_the_container_and_dies_with_it() {
     // `GetSurfaceLevel` gives a public reference of the child. The count of the
     // container goes up.
     let list = value.children.get().unwrap();
-    let child: ComPtr<IChild> = list[1].to_public();
+    // SAFETY: The container owns the child handle until its own destruction.
+    let child: ComPtr<IChild> = unsafe { list[1].to_public() };
     assert_eq!(container.public_count_of::<Container>(), Some(2));
     // SAFETY: The object is alive.
     assert_eq!(unsafe { child.Index() }, 1);
@@ -366,7 +372,7 @@ fn a_child_sends_its_counts_to_the_container_and_dies_with_it() {
 
     // `QueryInterface` on the child gives the identity of the child, not of the
     // container.
-    let unknown: ComPtr<cppvtable::IUnknown> = child.cast().unwrap();
+    let unknown: ComPtr<cppvtable_com::IUnknown> = child.cast().unwrap();
     assert_eq!(unknown.as_raw(), child.as_raw());
     assert_eq!(container.public_count_of::<Container>(), Some(3));
     drop(unknown);
@@ -407,7 +413,8 @@ fn a_child_stays_alive_while_the_application_holds_a_reference_of_it() {
             })])
             .is_ok()
     );
-    let child: ComPtr<IChild> = value.children.get().unwrap()[0].to_public();
+    // SAFETY: The container owns the child handle until its own destruction.
+    let child: ComPtr<IChild> = unsafe { value.children.get().unwrap()[0].to_public() };
 
     // The application releases the container. The child still holds a reference of it,
     // so nothing is destroyed.

@@ -13,6 +13,13 @@ use syn::{
 use crate::abi::Abi;
 use crate::validate::{GuidParts, ReturnKind, check_signature, classify_return, parse_guid};
 
+#[derive(Clone, Copy)]
+pub(crate) enum Runtime {
+    Abi,
+    Native,
+    Com,
+}
+
 /// The arguments of `#[interface(...)]`.
 pub(crate) struct InterfaceArgs {
     /// The binary interface.
@@ -24,8 +31,7 @@ pub(crate) struct InterfaceArgs {
     /// The interface has no base and the crate supplies the vtable builder. Only
     /// `IUnknown` uses this.
     pub(crate) root: bool,
-    /// The declaration is inside the `cppvtable` crate, so the paths start with
-    /// `crate`.
+    /// The declaration is inside a runtime crate, so generated paths start with `crate`.
     pub(crate) internal: bool,
 }
 
@@ -44,12 +50,15 @@ impl InterfaceArgs {
             match item {
                 Meta::NameValue(pair) if pair.path.is_ident("abi") => {
                     let name = path_expr_name(&pair.value).ok_or_else(|| {
-                        syn::Error::new(pair.value.span(), "abi: give `com`, `cpp`, or `c`")
+                        syn::Error::new(
+                            pair.value.span(),
+                            "abi: give `com`, `cpp`, `msvc`, `itanium`, or `c`",
+                        )
                     })?;
                     abi = Some(Abi::from_name(&name).ok_or_else(|| {
                         syn::Error::new(
                             pair.value.span(),
-                            format!("abi: `{name}` is unknown. Give `com`, `cpp`, or `c`."),
+                            format!("abi: `{name}` is unknown. Give `com`, `cpp`, `msvc`, `itanium`, or `c`."),
                         )
                     })?);
                 }
@@ -74,7 +83,7 @@ impl InterfaceArgs {
                 other => {
                     return Err(syn::Error::new(
                         other.span(),
-                        "unknown argument. Use `abi = com|cpp|c`, `iid = \"...\"`, \
+                        "unknown argument. Use `abi = com|cpp|msvc|itanium|c`, `iid = \"...\"`, \
                          `extends(IBase)`, `root`, or `internal`.",
                     ));
                 }
@@ -93,6 +102,12 @@ impl InterfaceArgs {
                 "a COM interface needs `iid = \"...\"`",
             ));
         }
+        if !abi.is_com() && iid.is_some() {
+            return Err(syn::Error::new(
+                span,
+                "iid is COM metadata; C/C++ interfaces use type identity",
+            ));
+        }
         if root && extends.is_some() {
             return Err(syn::Error::new(
                 span,
@@ -108,12 +123,25 @@ impl InterfaceArgs {
         })
     }
 
-    /// Give the path of the `cppvtable` crate.
-    pub(crate) fn krate(&self) -> TokenStream {
+    /// Give the public runtime path for this macro entry point.
+    pub(crate) fn krate(&self, runtime: Runtime) -> TokenStream {
         if self.internal {
             quote::quote! { crate }
         } else {
-            quote::quote! { ::cppvtable }
+            match runtime {
+                Runtime::Abi => quote::quote! { ::cppvtable_abi },
+                Runtime::Native => quote::quote! { ::cppvtable },
+                Runtime::Com => quote::quote! { ::cppvtable_com },
+            }
+        }
+    }
+
+    /// Give the ABI runtime path used in generated interface wrappers.
+    pub(crate) fn abi_krate(runtime: Runtime) -> TokenStream {
+        match runtime {
+            Runtime::Abi => quote::quote! { ::cppvtable_abi },
+            Runtime::Com => quote::quote! { ::cppvtable_com },
+            Runtime::Native => quote::quote! { ::cppvtable },
         }
     }
 }
@@ -193,12 +221,7 @@ impl InterfaceModel {
             }
             let options = MethodOptions::parse(&function.attrs)?;
             check_signature(&function.sig)?;
-            let kind = classify_return(
-                &function.sig.output,
-                &function.sig.ident,
-                options.scalar,
-                options.hidden_return,
-            )?;
+            let kind = options.return_kind(&function.sig.output, &function.sig.ident)?;
 
             let index = match options.slot {
                 Some(explicit) => {
@@ -276,15 +299,45 @@ struct MethodOptions {
     scalar: bool,
     /// `#[abi(hidden_return)]` is present.
     hidden_return: bool,
+    /// Portable aggregate return lowering.
+    aggregate: bool,
 }
 
 impl MethodOptions {
+    /// Classify the result and reject conflicting return-lowering requests.
+    fn return_kind(&self, output: &ReturnType, name: &Ident) -> Result<ReturnKind, syn::Error> {
+        if self.aggregate && (self.scalar || self.hidden_return) {
+            return Err(syn::Error::new(
+                name.span(),
+                "aggregate cannot be combined with scalar or hidden_return",
+            ));
+        }
+        let kind = classify_return(
+            output,
+            name,
+            self.scalar || self.aggregate,
+            self.hidden_return,
+        )?;
+        if self.aggregate {
+            if matches!(output, ReturnType::Default) {
+                return Err(syn::Error::new(
+                    name.span(),
+                    "aggregate needs a return type",
+                ));
+            }
+            Ok(ReturnKind::Aggregate)
+        } else {
+            Ok(kind)
+        }
+    }
+
     /// Read the attributes of a method.
     fn parse(attrs: &[Attribute]) -> Result<Self, syn::Error> {
         let mut options = Self {
             slot: None,
             scalar: false,
             hidden_return: false,
+            aggregate: false,
         };
         for attr in attrs {
             if attr.path().is_ident("doc") {
@@ -302,12 +355,13 @@ impl MethodOptions {
                     match name.to_string().as_str() {
                         "scalar" => options.scalar = true,
                         "hidden_return" => options.hidden_return = true,
+                        "aggregate" => options.aggregate = true,
                         other => {
                             return Err(syn::Error::new(
                                 name.span(),
                                 format!(
                                     "abi: `{other}` is unknown. Use `scalar` or \
-                                     `hidden_return`."
+                                     `hidden_return` or `aggregate`."
                                 ),
                             ));
                         }
@@ -329,7 +383,7 @@ impl MethodOptions {
 pub(crate) struct ImplementArgs {
     /// The implemented interfaces. The first one is the primary interface.
     pub(crate) interfaces: Vec<Path>,
-    /// The declaration is inside the `cppvtable` crate.
+    /// The declaration is inside `cppvtable-com`.
     pub(crate) internal: bool,
 }
 
@@ -359,12 +413,25 @@ impl ImplementArgs {
         })
     }
 
-    /// Give the path of the `cppvtable` crate.
-    pub(crate) fn krate(&self) -> TokenStream {
+    /// Give the runtime path used by `#[implement]`.
+    pub(crate) fn krate(&self, runtime: Runtime) -> TokenStream {
         if self.internal {
             quote::quote! { crate }
         } else {
-            quote::quote! { ::cppvtable }
+            match runtime {
+                Runtime::Abi => quote::quote! { ::cppvtable_abi },
+                Runtime::Native => quote::quote! { ::cppvtable },
+                Runtime::Com => quote::quote! { ::cppvtable_com },
+            }
+        }
+    }
+
+    /// Give the ABI runtime path used by generated vtable declarations.
+    pub(crate) fn abi_krate(runtime: Runtime) -> TokenStream {
+        match runtime {
+            Runtime::Abi => quote::quote! { ::cppvtable_abi },
+            Runtime::Com => quote::quote! { ::cppvtable_com },
+            Runtime::Native => quote::quote! { ::cppvtable },
         }
     }
 }

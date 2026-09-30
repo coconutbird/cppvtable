@@ -1,7 +1,7 @@
 //! Single inheritance C++ interop tests
 
 use super::*;
-use cppvtable::{ComObject, OwnedObject};
+use cppvtable::{Object, OwnedObject};
 
 /// Test that Rust can call C++ objects through our interface.
 #[test]
@@ -12,15 +12,15 @@ fn test_rust_calls_cpp_objects() {
 
         {
             // SAFETY: Both C++ objects stay alive through the borrowed interface calls.
-            let dog_ref = IAnimal::from_raw_ref(&cpp_dog);
-            let cat_ref = IAnimal::from_raw_ref(&cpp_cat);
+            let dog_ref = IForeignAnimal::from_raw_ref(&cpp_dog);
+            let cat_ref = IForeignAnimal::from_raw_ref(&cpp_cat);
 
             assert_eq!(dog_ref.legs(), 4);
             assert_eq!(cat_ref.legs(), 4);
         }
 
-        delete_cpp_animal(cpp_dog);
-        delete_cpp_animal(cpp_cat);
+        delete_cpp_dog(cpp_dog);
+        delete_cpp_cat(cpp_cat);
     }
 }
 
@@ -37,15 +37,15 @@ fn test_cpp_calls_rust_objects() {
 /// Test that the primary interface vtable starts at offset zero.
 #[test]
 fn test_vtable_at_offset_zero() {
-    assert_eq!(ComObject::<Dog>::slot_offset(0), 0);
-    assert_eq!(ComObject::<Cat>::slot_offset(0), 0);
+    assert_eq!(Object::<Dog>::slot_offset(0), 0);
+    assert_eq!(Object::<Cat>::slot_offset(0), 0);
 }
 
 /// Test the generated vtable has the same slots as the C++ interface.
 #[test]
 fn test_vtable_size() {
     let ptr_size = std::mem::size_of::<*const ()>();
-    assert_eq!(std::mem::size_of::<IAnimalVtbl>(), 2 * ptr_size);
+    assert_eq!(std::mem::size_of::<IForeignAnimalVtbl>(), 2 * ptr_size);
 }
 
 /// Test round-trip: create in C++, read in Rust, verify in C++.
@@ -56,7 +56,7 @@ fn test_cpp_rust_cpp_roundtrip() {
 
         {
             // SAFETY: The C++ object stays alive through both interface calls.
-            let dog_ref = IAnimal::from_raw_ref(&cpp_dog);
+            let dog_ref = IForeignAnimal::from_raw_ref(&cpp_dog);
             let legs_via_rust = dog_ref.legs();
             let legs_via_cpp = cpp_call_legs(cpp_dog);
 
@@ -64,6 +64,6 @@ fn test_cpp_rust_cpp_roundtrip() {
             assert_eq!(legs_via_rust, 4);
         }
 
-        delete_cpp_animal(cpp_dog);
+        delete_cpp_dog(cpp_dog);
     }
 }

@@ -10,9 +10,10 @@ use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-use cppvtable::{
-    ComObject, ComPtr, E_NOINTERFACE, E_POINTER, GUID, HRESULT, IUnknown, IUnknownVtbl, Interface,
-    RefCounted, S_OK, SingleRefCount, implement, interface,
+use cppvtable_com::{ComInterface, GUID, Interface};
+use cppvtable_com::{
+    ComObject, ComPtr, E_NOINTERFACE, E_POINTER, HRESULT, IUnknown, IUnknownVtbl, RefCounted, S_OK,
+    SingleRefCount, implement, interface,
 };
 
 /// A counter interface.
@@ -44,7 +45,8 @@ struct Counter {
     drops: Arc<AtomicU32>,
 }
 
-impl RefCounted for Counter {
+// SAFETY: Hooks obey the reference-count contract and all returned pointers stay live.
+unsafe impl RefCounted for Counter {
     type Policy = SingleRefCount;
 }
 
@@ -119,9 +121,9 @@ fn the_vtable_has_the_layout_of_a_com_vtable() {
 fn the_metadata_of_the_interface_is_correct() {
     assert_eq!(ICounter::NAME, "ICounter");
     // A COM interface answers its own IID and the IID of each ancestor.
-    assert!(cppvtable::interface_matches::<ICounter>(&ICounter::IID));
-    assert!(cppvtable::interface_matches::<ICounter>(&IUnknown::IID));
-    assert!(!cppvtable::interface_matches::<ICounter>(&INamed::IID));
+    assert!(cppvtable_com::interface_matches::<ICounter>(&ICounter::IID));
+    assert!(cppvtable_com::interface_matches::<ICounter>(&IUnknown::IID));
+    assert!(!cppvtable_com::interface_matches::<ICounter>(&INamed::IID));
     assert_eq!(ICounter::ANCESTORS, &[IUnknown::IID]);
     assert_eq!(IUnknown::ANCESTORS, &[] as &[GUID]);
     assert_eq!(
@@ -277,7 +279,7 @@ fn as_impl_answers_only_for_an_object_of_this_process() {
     let mut foreign_object = foreign_vtable;
     let raw: *mut c_void = ptr::from_mut(&mut foreign_object).cast();
     // SAFETY: `raw` refers to a place whose first field is a vtable pointer.
-    let found = unsafe { cppvtable::object_of_raw::<Counter>(raw) };
+    let found = unsafe { cppvtable_com::object_of_raw::<Counter>(raw) };
     assert!(found.is_none());
 }
 

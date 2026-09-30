@@ -9,9 +9,10 @@ use core::mem::{offset_of, size_of};
 use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use cppvtable::{
-    ComObject, ComPtr, E_POINTER, HRESULT, IUnknown, Interface, RefCounted, S_OK, SingleRefCount,
-    implement, interface,
+use cppvtable_com::ComInterface;
+use cppvtable_com::{
+    ComObject, ComPtr, E_POINTER, HRESULT, IUnknown, RefCounted, S_OK, SingleRefCount, implement,
+    interface,
 };
 
 /// The root of the chain.
@@ -46,7 +47,8 @@ struct Texture {
     levels: u32,
 }
 
-impl RefCounted for Texture {
+// SAFETY: Hooks obey the reference-count contract and all returned pointers stay live.
+unsafe impl RefCounted for Texture {
     type Policy = SingleRefCount;
 }
 

@@ -82,7 +82,7 @@ unsafe impl RefCountPolicy for DualRefCount {
             // The public count now holds one private reference.
             state.private.fetch_add(1, Ordering::AcqRel);
             // SAFETY: The object is live.
-            unsafe { (*object).data() }.on_first_public_ref();
+            unsafe { (*object).data().on_first_public_ref() };
             state.public.unlock();
         }
         edge.count
@@ -99,7 +99,7 @@ unsafe impl RefCountPolicy for DualRefCount {
             // The private reference of the public count is still there, so the object
             // is alive during the hook.
             // SAFETY: The object is live.
-            unsafe { (*object).data() }.on_last_public_release();
+            unsafe { (*object).data().on_last_public_release() };
             state.public.unlock();
             // SAFETY: This thread owns the private reference of the public count.
             unsafe { Self::drop_private(object) };

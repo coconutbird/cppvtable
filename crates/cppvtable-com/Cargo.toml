@@ -1,0 +1,21 @@
+[package]
+name = "cppvtable-com"
+description = "COM interfaces, objects, and reference-count policies built on cppvtable-abi."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+# Use the `GUID` and `HRESULT` types of `windows-core` instead of the own types.
+windows-compat = ["dep:windows-core"]
+
+[dependencies]
+cppvtable-abi.workspace = true
+cppvtable-macro.workspace = true
+windows-core = { workspace = true, optional = true }
+
+[lints]
+workspace = true

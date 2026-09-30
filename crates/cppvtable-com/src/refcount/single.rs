@@ -43,7 +43,7 @@ unsafe impl RefCountPolicy for SingleRefCount {
         let edge = state.public.add();
         if edge.crossed {
             // SAFETY: The object is live.
-            unsafe { (*object).data() }.on_first_public_ref();
+            unsafe { (*object).data().on_first_public_ref() };
             state.public.unlock();
         }
         edge.count
@@ -58,7 +58,7 @@ unsafe impl RefCountPolicy for SingleRefCount {
         let edge = state.public.sub();
         if edge.crossed {
             // SAFETY: The object is live until the call of `destroy`.
-            unsafe { (*object).data() }.on_last_public_release();
+            unsafe { (*object).data().on_last_public_release() };
             state.public.unlock();
             // The fence makes the writes of all other threads visible before the
             // destructor runs. Each `Release` of another thread wrote with `AcqRel`.

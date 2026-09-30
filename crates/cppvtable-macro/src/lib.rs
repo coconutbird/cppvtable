@@ -1,11 +1,7 @@
-//! The attribute macros of the crate `cppvtable`.
+//! Shared generators for ABI declarations, ordinary C/C++ objects, and COM objects.
 //!
-//! - `#[interface]` declares a binary interface: a COM interface, a C++ class with
-//!   virtual methods, or a C table of function pointers.
-//! - `#[implement]` gives an object the static vtables of one or more interfaces.
-//!
-//! Use the macros through `cppvtable`. That crate holds the documentation of the object
-//! model and of the reference count policies.
+//! `cppvtable-abi` reexports the caller-only macro. `cppvtable` reexports ordinary
+//! interface/object generators. `cppvtable-com` reexports COM-specific generators.
 
 mod abi;
 mod implement;
@@ -30,30 +26,32 @@ use proc_macro::TokenStream;
 ///
 /// # Arguments
 ///
-/// - `abi = com | cpp | c`: the calling convention. `com` uses `extern "system"`. `cpp`
-///   uses `extern "thiscall"` on x86 and `extern "C"` on all other targets. `c` uses
-///   `extern "C"`.
-/// - `iid = "..."`: the interface identifier. A COM interface needs it. A `cpp` or `c`
-///   interface may leave it out and then uses the zero GUID.
+/// - `abi = com`: the COM entry point uses `extern "system"`. The ordinary C/C++
+///   entry points accept `cpp` (target default), `msvc`, `itanium`, or `c`.
+///   MSVC x86 uses `extern "thiscall"`; other supported C/C++ targets use `extern "C"`.
+///   Explicit MSVC/Itanium selections must agree with the Rust target environment.
+/// - `iid = "..."`: required COM interface identifier; unavailable for ordinary objects.
 /// - `extends(IBase)`: the base interface. A COM interface without `extends` comes
 ///   directly from `IUnknown`.
-/// - `root`: the interface has no base and the crate supplies the vtable builder. Only
-///   `IUnknown` uses this.
-/// - `internal`: the paths of the generated code start with `crate`. Only the crate
-///   `cppvtable` uses this.
+/// - `root`: the interface has no base. For COM, the runtime supplies the root vtable
+///   builder; ordinary objects generate their own implementation shims.
+/// - `internal`: the paths of the generated code start with `crate`. Only the
+///   `cppvtable-com` runtime crate uses this.
 ///
 /// # Method attributes
 ///
 /// - `#[slot(N)]`: put the method at the index `N` of the derived part of the vtable.
 ///   The macro fills the space with reserved entries.
-/// - `#[abi(hidden_return)]`: the MSVC ABI gives the return value back through a hidden
-///   pointer after `this`. Use it for a method that returns a structure.
-/// - `#[abi(scalar)]`: the return type is a transparent wrapper of a number or of a
-///   pointer, so the value goes back in a register.
+/// - `#[abi(hidden_return)]`: explicitly lower an indirect result pointer after `this`
+///   for Microsoft C++/COM, or before `this` for Itanium C++. Use only when the foreign
+///   signature matches that convention; prefer `aggregate` for trivial structures.
+/// - `#[abi(scalar)]`: a transparent scalar wrapper returned using native scalar lowering.
+/// - `#[abi(aggregate)]`: a trivially copyable `#[repr(C)]` structure returned according
+///   to the selected C/C++ ABI. Nontrivial C++ classes require an explicit C shim.
 ///
 /// # Generated items
 ///
-/// See the module documentation of `cppvtable` for the list.
+/// See the module documentation of `cppvtable-com` for the full runtime contract.
 #[proc_macro_attribute]
 pub fn interface(args: TokenStream, item: TokenStream) -> TokenStream {
     let parsed = match syn::parse::<syn::ItemTrait>(item) {
@@ -61,6 +59,35 @@ pub fn interface(args: TokenStream, item: TokenStream) -> TokenStream {
         Err(error) => return error.to_compile_error().into(),
     };
     match interface::expand(args.into(), &parsed) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+/// Declare an ABI interface without generating a Rust-owned object implementation.
+///
+/// Re-exported as `interface` by `cppvtable-abi`. The COM crate uses [`interface`]
+/// instead, which also generates the implementation shims for `#[implement]`.
+#[proc_macro_attribute]
+pub fn interface_abi(args: TokenStream, item: TokenStream) -> TokenStream {
+    let parsed = match syn::parse::<syn::ItemTrait>(item) {
+        Ok(parsed) => parsed,
+        Err(error) => return error.to_compile_error().into(),
+    };
+    match interface::expand_abi(args.into(), &parsed) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+/// Declare a callable and Rust-implementable C/C++ interface through `cppvtable`.
+#[proc_macro_attribute]
+pub fn interface_native(args: TokenStream, item: TokenStream) -> TokenStream {
+    let parsed = match syn::parse::<syn::ItemTrait>(item) {
+        Ok(parsed) => parsed,
+        Err(error) => return error.to_compile_error().into(),
+    };
+    match interface::expand_native(args.into(), &parsed) {
         Ok(tokens) => tokens.into(),
         Err(error) => error.to_compile_error().into(),
     }
@@ -74,7 +101,7 @@ pub fn interface(args: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// impl IDirect3DVertexBuffer9Impl for VertexBuffer { /* ... */ }
 /// impl IDirect3DResource9Impl for VertexBuffer { /* each ancestor */ }
-/// impl RefCounted for VertexBuffer { type Policy = DualRefCount; }
+/// unsafe impl RefCounted for VertexBuffer { type Policy = DualRefCount; }
 /// ```
 ///
 /// The first interface of the list is the primary interface. Its vtable pointer is at
@@ -82,7 +109,7 @@ pub fn interface(args: TokenStream, item: TokenStream) -> TokenStream {
 /// This is the identity rule of COM.
 ///
 /// Add `internal` to the list to make the paths of the generated code start with
-/// `crate`. Only the crate `cppvtable` uses it.
+/// `crate`. Only the `cppvtable-com` runtime crate uses it.
 #[proc_macro_attribute]
 pub fn implement(args: TokenStream, item: TokenStream) -> TokenStream {
     let parsed = match syn::parse::<syn::ItemStruct>(item) {
@@ -90,6 +117,24 @@ pub fn implement(args: TokenStream, item: TokenStream) -> TokenStream {
         Err(error) => return error.to_compile_error().into(),
     };
     match implement::expand(args.into(), &parsed) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => {
+            let mut output = proc_macro2::TokenStream::new();
+            quote::ToTokens::to_tokens(&parsed, &mut output);
+            output.extend(error.to_compile_error());
+            output.into()
+        }
+    }
+}
+
+/// Implement C/C++ interfaces through `cppvtable`, without a COM object model.
+#[proc_macro_attribute]
+pub fn implement_native(args: TokenStream, item: TokenStream) -> TokenStream {
+    let parsed = match syn::parse::<syn::ItemStruct>(item) {
+        Ok(parsed) => parsed,
+        Err(error) => return error.to_compile_error().into(),
+    };
+    match implement::expand_native(args.into(), &parsed) {
         Ok(tokens) => tokens.into(),
         Err(error) => {
             let mut output = proc_macro2::TokenStream::new();

@@ -1,26 +1,17 @@
-//! The code generator of `#[interface]`.
+//! The code generator of the shared `#[interface]` macro.
 //!
-//! For `IFoo` the macro makes:
-//!
-//! - `IFoo`: the interface type. It is a transparent wrapper of one interface pointer.
-//!   It has one method for each declared method. A method calls through the vtable.
-//! - `IFooVtbl`: the `#[repr(C)]` vtable structure. The first field is the vtable of the
-//!   base interface.
-//! - `impl Interface for IFoo`: the vtable type, the IID, and the IIDs of the chain.
-//! - `impl Deref for IFoo`: the base interface. A `ComPtr<IFoo>` therefore also gives
-//!   the methods of each base interface.
-//! - `IFooImpl`: the trait of the implementer. Its supertrait is the `Impl` trait of the
-//!   base interface.
-//! - `IFooVtbl::new::<T, SLOT>()`: the builder of a static vtable for the type `T`.
-//! - One shim for each method. A shim moves `this` back to the start of the allocation
-//!   and calls the method of `IFooImpl`.
+//! The ABI entry point emits only the interface wrapper, vtable, and metadata needed to
+//! call a foreign object. The COM entry point also emits implementation shims, an
+//! implementer trait, and a vtable builder for `cppvtable-com`'s object model.
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{Ident, ItemTrait, Path, Visibility};
 
-use crate::abi::AbiVariant;
-use crate::parse::{InterfaceArgs, InterfaceModel, Method, derived_name, derived_path, shim_name};
+use crate::abi::{Abi, AbiVariant};
+use crate::parse::{
+    InterfaceArgs, InterfaceModel, Method, Runtime, derived_name, derived_path, shim_name,
+};
 use crate::validate::{ReturnKind, needs_non_snake_case};
 
 #[cfg(test)]
@@ -40,34 +31,116 @@ enum Base {
     Interface(Path),
 }
 
-/// Expand `#[interface(...)]`.
+/// Expand the full interface macro used by the COM runtime crate.
 pub(crate) fn expand(args: TokenStream, item: &ItemTrait) -> Result<TokenStream, syn::Error> {
     let args = InterfaceArgs::parse(args)?;
+    if !args.abi.is_com() {
+        return Err(syn::Error::new_spanned(
+            item,
+            "use cppvtable::interface for C/C++ implementations",
+        ));
+    }
     let model = InterfaceModel::parse(item)?;
-    Ok(generate(&args, &model))
+    Ok(generate(&args, &model, Runtime::Com, true))
+}
+
+/// Expand the standalone ABI crate's foreign interface macro.
+pub(crate) fn expand_abi(args: TokenStream, item: &ItemTrait) -> Result<TokenStream, syn::Error> {
+    expand_abi_with_runtime(args, item, Runtime::Abi)
+}
+
+/// Expand the ABI macro re-exported by the ordinary C/C++ crate.
+pub(crate) fn expand_native(
+    args: TokenStream,
+    item: &ItemTrait,
+) -> Result<TokenStream, syn::Error> {
+    let args = InterfaceArgs::parse(args)?;
+    if args.abi.is_com() {
+        return Err(syn::Error::new_spanned(
+            item,
+            "use cppvtable_com::interface for COM interfaces",
+        ));
+    }
+    let model = InterfaceModel::parse(item)?;
+    Ok(generate(&args, &model, Runtime::Native, true))
+}
+
+fn expand_abi_with_runtime(
+    args: TokenStream,
+    item: &ItemTrait,
+    runtime: Runtime,
+) -> Result<TokenStream, syn::Error> {
+    let args = InterfaceArgs::parse(args)?;
+    if args.abi.is_com() {
+        return Err(syn::Error::new_spanned(
+            item,
+            "the ABI crate declares only `abi = cpp`, `msvc`, `itanium`, or `c` interfaces",
+        ));
+    }
+    let model = InterfaceModel::parse(item)?;
+    Ok(generate(&args, &model, runtime, false))
 }
 
 /// Make the whole output of the macro.
-fn generate(args: &InterfaceArgs, model: &InterfaceModel) -> TokenStream {
-    let krate = args.krate();
+fn generate(
+    args: &InterfaceArgs,
+    model: &InterfaceModel,
+    runtime: Runtime,
+    implementable: bool,
+) -> TokenStream {
+    let krate = args.krate(runtime);
+    let abi_crate = if args.internal {
+        krate.clone()
+    } else {
+        InterfaceArgs::abi_krate(runtime)
+    };
     let name = &model.name;
     let vis = &model.vis;
     let vtbl_name = derived_name(name, "Vtbl");
     let impl_name = derived_name(name, "Impl");
     let base = base_of(args);
+    let is_plain = matches!(runtime, Runtime::Native);
+    let object = if is_plain {
+        quote! { #krate::Object }
+    } else {
+        quote! { #krate::ComObject }
+    };
+    let implementation = if is_plain {
+        quote! { #krate::Implement }
+    } else {
+        quote! { #krate::ComImplement }
+    };
+    let generate_shims = implementable && (!args.root || is_plain);
 
-    let mut output = TokenStream::new();
+    let mut output = match args.abi {
+        Abi::Msvc => quote! {
+            #[cfg(not(target_env = "msvc"))]
+            compile_error!("abi = msvc requires an MSVC target; use abi = cpp for the target default");
+        },
+        Abi::Itanium => quote! {
+            #[cfg(target_env = "msvc")]
+            compile_error!("abi = itanium requires a non-MSVC target; use abi = cpp for the target default");
+        },
+        _ => TokenStream::new(),
+    };
     for variant in args.abi.variants() {
         output.extend(vtable_struct(model, &variant, &base, &krate, &vtbl_name));
-        if !args.root {
-            output.extend(shims(model, &variant, &krate, &impl_name));
+        if generate_shims {
+            output.extend(shims(model, &variant, &object, &impl_name));
         }
     }
-    output.extend(interface_type(model, &krate, &vtbl_name));
-    output.extend(interface_trait_impl(args, model, &base, &krate, &vtbl_name));
+    output.extend(interface_type(
+        model,
+        &abi_crate,
+        &vtbl_name,
+        &args.abi.variants(),
+    ));
+    output.extend(interface_trait_impl(
+        args, model, &base, &krate, &abi_crate, &vtbl_name, is_plain,
+    ));
     output.extend(deref_to_base(model, &base, &krate));
-    if !args.root {
-        output.extend(impl_trait(model, &base, &krate, &impl_name));
+    if generate_shims {
+        output.extend(impl_trait(model, &base, &implementation, &impl_name));
         output.extend(vtable_builder(
             model, &base, &krate, &vtbl_name, &impl_name, vis,
         ));
@@ -111,9 +184,9 @@ impl Base {
     }
 
     /// Give the supertrait of the `Impl` trait.
-    fn impl_bound(&self, krate: &TokenStream) -> TokenStream {
+    fn impl_bound(&self, implementation: &TokenStream) -> TokenStream {
         match self {
-            Self::None | Self::Unknown => quote! { #krate::ComImplement },
+            Self::None | Self::Unknown => quote! { #implementation },
             Self::Interface(path) => {
                 let bound = derived_path(path, "Impl");
                 quote! { #bound }
@@ -146,7 +219,7 @@ fn vtable_struct(
         if let Some(method) = &slot.method {
             let docs = &method.docs;
             let field = &method.name;
-            let ty = pointer_type(method, convention);
+            let ty = pointer_type(method, variant);
             quote! {
                 #(#docs)*
                 pub #field: #ty,
@@ -181,22 +254,41 @@ fn vtable_struct(
     }
 }
 
+/// Choose the target-specific lowering of a portable aggregate return.
+fn effective_kind(kind: ReturnKind, variant: &AbiVariant) -> ReturnKind {
+    if kind == ReturnKind::Aggregate && variant.aggregate_hidden {
+        ReturnKind::Hidden
+    } else {
+        kind
+    }
+}
+
+/// The leading arguments of an explicitly lowered indirect return.
+fn hidden_parameters(variant: &AbiVariant, ret: &TokenStream) -> TokenStream {
+    if variant.hidden_before_this {
+        quote! { result: *mut #ret, this: *mut ::core::ffi::c_void, }
+    } else {
+        quote! { this: *mut ::core::ffi::c_void, result: *mut #ret, }
+    }
+}
+
 /// Give the type of the function pointer of a method.
-fn pointer_type(method: &Method, convention: &str) -> TokenStream {
+fn pointer_type(method: &Method, variant: &AbiVariant) -> TokenStream {
     let names = method.params.iter().map(|param| &param.name);
     let types = method.params.iter().map(|param| &param.ty);
-    match method.kind {
+    let convention = variant.convention;
+    match effective_kind(method.kind, variant) {
         ReturnKind::Hidden => {
             let ret = return_type(method);
+            let prefix = hidden_parameters(variant, &ret);
             quote! {
                 unsafe extern #convention fn(
-                    this: *mut ::core::ffi::c_void,
-                    result: *mut #ret,
+                    #prefix
                     #(#names: #types),*
                 ) -> *mut #ret
             }
         }
-        ReturnKind::Scalar | ReturnKind::Unit => {
+        ReturnKind::Scalar | ReturnKind::Unit | ReturnKind::Aggregate => {
             let output = &method.output;
             quote! {
                 unsafe extern #convention fn(
@@ -220,7 +312,7 @@ fn return_type(method: &Method) -> TokenStream {
 fn shims(
     model: &InterfaceModel,
     variant: &AbiVariant,
-    krate: &TokenStream,
+    object: &TokenStream,
     impl_name: &Ident,
 ) -> TokenStream {
     let cfg = &variant.cfg;
@@ -233,21 +325,21 @@ fn shims(
         let names: Vec<&Ident> = method.params.iter().map(|param| &param.name).collect();
         let types = method.params.iter().map(|param| &param.ty);
         let doc = format!("The shim of [`{name}::{method_name}`].");
-        Some(match method.kind {
+        Some(match effective_kind(method.kind, variant) {
             ReturnKind::Hidden => {
                 let ret = return_type(method);
                 let expect = many_arguments_expect(method.params.len() + 2);
+                let prefix = hidden_parameters(variant, &ret);
                 quote! {
                     #[doc = #doc]
                     #cfg
                     #expect
                     unsafe extern #convention fn #shim<T: #impl_name, const SLOT: usize>(
-                        this: *mut ::core::ffi::c_void,
-                        result: *mut #ret,
+                        #prefix
                         #(#names: #types),*
                     ) -> *mut #ret {
                         unsafe {
-                            let object = #krate::ComObject::<T>::impl_from_slot(this, SLOT);
+                            let object = #object::<T>::impl_from_slot(this, SLOT);
                             let value = <T as #impl_name>::#method_name(object #(, #names)*);
                             ::core::ptr::write(result, value);
                             result
@@ -255,7 +347,7 @@ fn shims(
                     }
                 }
             }
-            ReturnKind::Scalar | ReturnKind::Unit => {
+            ReturnKind::Scalar | ReturnKind::Unit | ReturnKind::Aggregate => {
                 let output = &method.output;
                 let expect = many_arguments_expect(method.params.len() + 1);
                 quote! {
@@ -267,7 +359,7 @@ fn shims(
                         #(#names: #types),*
                     ) #output {
                         unsafe {
-                            let object = #krate::ComObject::<T>::impl_from_slot(this, SLOT);
+                            let object = #object::<T>::impl_from_slot(this, SLOT);
                             <T as #impl_name>::#method_name(object #(, #names)*)
                         }
                     }
@@ -279,20 +371,28 @@ fn shims(
 }
 
 /// Make the interface type and its methods.
-fn interface_type(model: &InterfaceModel, krate: &TokenStream, vtbl_name: &Ident) -> TokenStream {
+fn interface_type(
+    model: &InterfaceModel,
+    abi_crate: &TokenStream,
+    vtbl_name: &Ident,
+    variants: &[AbiVariant],
+) -> TokenStream {
     let name = &model.name;
     let vis = &model.vis;
     let docs = &model.docs;
     let type_doc = format!(
         "The interface `{name}`.\n\n\
-         The type is a transparent wrapper of one interface pointer. A `ComPtr<{name}>` \
-         owns a public reference and derefs to this type, so the methods below and the \
-         methods of each base interface are available."
+         The type is a transparent wrapper of one interface pointer. Borrow a raw \
+         pointer with `from_raw_ref`; its caller keeps the foreign object alive."
     );
 
-    let methods = model.slots.iter().filter_map(|slot| {
-        let method = slot.method.as_ref()?;
-        Some(caller_method(method, krate, vis))
+    let methods = variants.iter().flat_map(|variant| {
+        model.slots.iter().filter_map(move |slot| {
+            let method = slot.method.as_ref()?;
+            let cfg = &variant.cfg;
+            let caller = caller_method(method, abi_crate, vis, variant);
+            Some(quote! { #cfg #caller })
+        })
     });
 
     let expect = non_snake_case_expect(
@@ -334,7 +434,7 @@ fn interface_type(model: &InterfaceModel, krate: &TokenStream, vtbl_name: &Ident
             #[inline]
             #[must_use]
             #vis fn vtable(&self) -> *const #vtbl_name {
-                #krate::vtable_of::<Self>(self)
+                #abi_crate::vtable_of::<Self>(self)
             }
 
             #(#methods)*
@@ -343,15 +443,25 @@ fn interface_type(model: &InterfaceModel, krate: &TokenStream, vtbl_name: &Ident
 }
 
 /// Make one method of the interface type. The method calls through the vtable.
-fn caller_method(method: &Method, krate: &TokenStream, vis: &Visibility) -> TokenStream {
+fn caller_method(
+    method: &Method,
+    krate: &TokenStream,
+    vis: &Visibility,
+    variant: &AbiVariant,
+) -> TokenStream {
     let docs = &method.docs;
     let name = &method.name;
     let names: Vec<&Ident> = method.params.iter().map(|param| &param.name).collect();
     let types = method.params.iter().map(|param| &param.ty);
     let expect = many_arguments_expect(method.params.len() + 1);
-    match method.kind {
+    match effective_kind(method.kind, variant) {
         ReturnKind::Hidden => {
             let ret = return_type(method);
+            let arguments = if variant.hidden_before_this {
+                quote! { result.as_mut_ptr(), #krate::raw_of::<Self>(self) }
+            } else {
+                quote! { #krate::raw_of::<Self>(self), result.as_mut_ptr() }
+            };
             quote! {
                 #(#docs)*
                 ///
@@ -365,8 +475,7 @@ fn caller_method(method: &Method, krate: &TokenStream, vis: &Visibility) -> Toke
                     unsafe {
                         let mut result = ::core::mem::MaybeUninit::<#ret>::uninit();
                         ((*#krate::vtable_of::<Self>(self)).#name)(
-                            #krate::raw_of::<Self>(self),
-                            result.as_mut_ptr()
+                            #arguments
                             #(, #names)*
                         );
                         result.assume_init()
@@ -374,7 +483,7 @@ fn caller_method(method: &Method, krate: &TokenStream, vis: &Visibility) -> Toke
                 }
             }
         }
-        ReturnKind::Scalar | ReturnKind::Unit => {
+        ReturnKind::Scalar | ReturnKind::Unit | ReturnKind::Aggregate => {
             let output = &method.output;
             quote! {
                 #(#docs)*
@@ -403,49 +512,65 @@ fn interface_trait_impl(
     model: &InterfaceModel,
     base: &Base,
     krate: &TokenStream,
+    abi_crate: &TokenStream,
     vtbl_name: &Ident,
+    is_plain: bool,
 ) -> TokenStream {
     let name = &model.name;
     let name_text = name.to_string();
-    let is_com = args.abi.is_com();
-    let iid = if let Some(guid) = &args.iid {
+    let extra = if args.abi.is_com() {
+        let guid = args.iid.as_ref().expect("COM arguments require an IID");
         let data1 = guid.data1;
         let data2 = guid.data2;
         let data3 = guid.data3;
         let data4 = guid.data4;
-        quote! { #krate::GUID::from_values(#data1, #data2, #data3, [#(#data4),*]) }
-    } else {
-        quote! { #krate::GUID::from_values(0, 0, 0, [0, 0, 0, 0, 0, 0, 0, 0]) }
-    };
-    let ancestors = match base.interface_type(krate) {
-        None => quote! { &[] },
-        Some(base_type) => quote! {
-            {
-                const LENGTH: usize =
-                    <#base_type as #krate::Interface>::ANCESTORS.len() + 1;
-                const LIST: [#krate::GUID; LENGTH] = {
-                    let mut list = [<#base_type as #krate::Interface>::IID; LENGTH];
-                    let source = <#base_type as #krate::Interface>::ANCESTORS;
-                    let mut index = 0;
-                    while index < source.len() {
-                        list[index + 1] = source[index];
-                        index += 1;
-                    }
-                    list
-                };
-                &LIST
+        let ancestors = match base.interface_type(krate) {
+            None => quote! { &[] },
+            Some(base_type) => quote! {
+                {
+                    const LENGTH: usize = <#base_type as #krate::ComInterface>::ANCESTORS.len() + 1;
+                    const LIST: [#krate::GUID; LENGTH] = {
+                        let mut list = [<#base_type as #krate::ComInterface>::IID; LENGTH];
+                        let source = <#base_type as #krate::ComInterface>::ANCESTORS;
+                        let mut index = 0;
+                        while index < source.len() {
+                            list[index + 1] = source[index];
+                            index += 1;
+                        }
+                        list
+                    };
+                    &LIST
+                }
+            },
+        };
+        quote! {
+            unsafe impl #krate::ComInterface for #name {
+                const IID: #krate::GUID = #krate::GUID::from_values(#data1, #data2, #data3, [#(#data4),*]);
+                const ANCESTORS: &'static [#krate::GUID] = #ancestors;
             }
-        },
+        }
+    } else if is_plain {
+        let matches_base = base.interface_type(krate).map(|ty| {
+            quote! {
+                || <#ty as #krate::CppInterface>::matches_type(id)
+            }
+        });
+        quote! {
+            unsafe impl #krate::CppInterface for #name {
+                fn matches_type(id: ::core::any::TypeId) -> bool {
+                    id == ::core::any::TypeId::of::<Self>() #matches_base
+                }
+            }
+        }
+    } else {
+        TokenStream::new()
     };
-
     quote! {
-        unsafe impl #krate::Interface for #name {
+        unsafe impl #abi_crate::Interface for #name {
             type Vtbl = #vtbl_name;
-            const IID: #krate::GUID = #iid;
-            const ANCESTORS: &'static [#krate::GUID] = #ancestors;
-            const IS_COM: bool = #is_com;
             const NAME: &'static str = #name_text;
         }
+        #extra
     }
 }
 
@@ -471,12 +596,12 @@ fn deref_to_base(model: &InterfaceModel, base: &Base, krate: &TokenStream) -> To
 fn impl_trait(
     model: &InterfaceModel,
     base: &Base,
-    krate: &TokenStream,
+    implementation: &TokenStream,
     impl_name: &Ident,
 ) -> TokenStream {
     let name = &model.name;
     let vis = &model.vis;
-    let bound = base.impl_bound(krate);
+    let bound = base.impl_bound(implementation);
     let doc = format!(
         "The implementer side of [`{name}`].\n\n\
          Implement this trait for the type that `#[implement({name})]` marks. Each \

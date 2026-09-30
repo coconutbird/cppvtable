@@ -32,6 +32,8 @@ pub(crate) enum ReturnKind {
     Scalar,
     /// The value goes back through a hidden pointer after `this`.
     Hidden,
+    /// A trivial repr(C) aggregate lowered according to the target C/C++ ABI.
+    Aggregate,
 }
 
 /// The return types that the MSVC ABI gives back in a register.
@@ -238,13 +240,13 @@ pub(crate) fn check_signature(signature: &Signature) -> Result<(), syn::Error> {
     }
 
     for argument in &signature.inputs {
-        if let FnArg::Typed(typed) = argument
-            && let Err(message) = check_ffi_type(&typed.ty)
-        {
-            return Err(syn::Error::new(
-                typed.ty.span(),
-                format!("method `{name}`: {message}"),
-            ));
+        if let FnArg::Typed(typed) = argument {
+            if let Err(message) = check_ffi_type(&typed.ty) {
+                return Err(syn::Error::new(
+                    typed.ty.span(),
+                    format!("method `{name}`: {message}"),
+                ));
+            }
         }
     }
     Ok(())

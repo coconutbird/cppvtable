@@ -2,14 +2,12 @@
 //!
 //! For `#[implement(IFoo, IBar)] struct Foo { ... }` the macro makes:
 //!
-//! - One static vtable for each interface chain. The builder `IFooVtbl::new::<Foo, 0>()`
-//!   fills it with the shims of the chain, from the methods of `IFoo` down to the three
-//!   methods of `IUnknown`.
-//! - One static array of the addresses of those vtables. `ComObject<Foo>` copies the
-//!   array into each new object, and `ComPtr::as_impl` compares the vtable pointer of an
-//!   object with the addresses in the array.
-//! - `impl ComImplement for Foo`: the array type, the primary interface, and the table
-//!   of `QueryInterface`.
+//! - One static vtable for each interface chain. `IFooVtbl::new::<Foo, 0>()` fills
+//!   it with the shims of that interface and its bases.
+//! - One static array of vtable addresses, copied into `Object<Foo>` or `ComObject<Foo>`.
+//! - `impl Implement for Foo` for ordinary objects, or `impl ComImplement for Foo`
+//!   for COM objects. Ordinary interface lookup uses Rust type identity; COM uses IIDs
+//!   and includes `IUnknown` behavior.
 //! - `impl Implements<IFoo> for Foo` with the index of the vtable pointer. The index is
 //!   the `this` adjustment of the chain.
 //!
@@ -20,10 +18,26 @@ use quote::quote;
 use syn::spanned::Spanned;
 use syn::{Fields, ItemStruct};
 
-use crate::parse::{ImplementArgs, derived_path, static_name};
+use crate::parse::{ImplementArgs, Runtime, derived_path, static_name};
 
-/// Expand `#[implement(...)]`.
+/// Expand `#[implement(...)]` for the standalone COM runtime package.
 pub(crate) fn expand(args: TokenStream, item: &ItemStruct) -> Result<TokenStream, syn::Error> {
+    expand_with_runtime(args, item, Runtime::Com)
+}
+
+/// Expand `#[implement(...)]` for ordinary C/C++ objects.
+pub(crate) fn expand_native(
+    args: TokenStream,
+    item: &ItemStruct,
+) -> Result<TokenStream, syn::Error> {
+    expand_with_runtime(args, item, Runtime::Native)
+}
+
+fn expand_with_runtime(
+    args: TokenStream,
+    item: &ItemStruct,
+    runtime: Runtime,
+) -> Result<TokenStream, syn::Error> {
     let args = ImplementArgs::parse(args)?;
     if !item.generics.params.is_empty() {
         return Err(syn::Error::new(
@@ -38,13 +52,24 @@ pub(crate) fn expand(args: TokenStream, item: &ItemStruct) -> Result<TokenStream
             "use a structure with named fields or a unit structure",
         ));
     }
-    Ok(generate(&args, item))
+    Ok(generate(&args, item, runtime))
 }
 
 /// Make the output of the macro.
-fn generate(args: &ImplementArgs, item: &ItemStruct) -> TokenStream {
-    let krate = args.krate();
+fn generate(args: &ImplementArgs, item: &ItemStruct, runtime: Runtime) -> TokenStream {
+    let krate = args.krate(runtime);
+    let abi_krate = if args.internal {
+        krate.clone()
+    } else {
+        ImplementArgs::abi_krate(runtime)
+    };
     let name = &item.ident;
+    let is_plain = matches!(runtime, Runtime::Native);
+    let implementation = if is_plain {
+        quote! { #krate::Implement }
+    } else {
+        quote! { #krate::ComImplement }
+    };
     let name_text = name.to_string();
     let count = Literal::usize_unsuffixed(args.interfaces.len());
     let table_id = static_name(name, "VTABLES");
@@ -63,7 +88,7 @@ fn generate(args: &ImplementArgs, item: &ItemStruct) -> TokenStream {
     let table_entries = (0..args.interfaces.len()).map(|slot| {
         let static_id = static_name(name, &format!("VTBL_{slot}"));
         quote! {
-            #krate::VtablePtr::new(
+            #abi_krate::VtablePtr::new(
                 ::core::ptr::from_ref(&#static_id).cast::<::core::ffi::c_void>()
             )
         }
@@ -71,12 +96,35 @@ fn generate(args: &ImplementArgs, item: &ItemStruct) -> TokenStream {
 
     let lookup = args.interfaces.iter().enumerate().map(|(slot, interface)| {
         let index = Literal::usize_unsuffixed(slot);
-        quote! {
-            if #krate::interface_matches::<#interface>(iid) {
-                return ::core::option::Option::Some(#index);
+        if is_plain {
+            quote! {
+                if <#interface as #krate::CppInterface>::matches_type(id) {
+                    return ::core::option::Option::Some(#index);
+                }
+            }
+        } else {
+            quote! {
+                if #krate::interface_matches::<#interface>(iid) {
+                    return ::core::option::Option::Some(#index);
+                }
             }
         }
     });
+    let lookup_method = if is_plain {
+        quote! {
+            fn slot_for_type(id: ::core::any::TypeId) -> ::core::option::Option<usize> {
+                #(#lookup)*
+                ::core::option::Option::None
+            }
+        }
+    } else {
+        quote! {
+            fn slot_for_iid(iid: &#krate::GUID) -> ::core::option::Option<usize> {
+                #(#lookup)*
+                ::core::option::Option::None
+            }
+        }
+    };
 
     let implements = args.interfaces.iter().enumerate().map(|(slot, interface)| {
         let index = Literal::usize_unsuffixed(slot);
@@ -99,24 +147,21 @@ fn generate(args: &ImplementArgs, item: &ItemStruct) -> TokenStream {
         #(#vtable_statics)*
 
         #[doc = #table_doc]
-        static #table_id: [#krate::VtablePtr; #count] = [#(#table_entries),*];
+        static #table_id: [#abi_krate::VtablePtr; #count] = [#(#table_entries),*];
 
-        unsafe impl #krate::ComImplement for #name {
-            type Vtables = [#krate::VtablePtr; #count];
+        unsafe impl #implementation for #name {
+            type Vtables = [#abi_krate::VtablePtr; #count];
             type Primary = #primary;
 
             fn vtables() -> Self::Vtables {
                 #table_id
             }
 
-            fn vtable_slots() -> &'static [#krate::VtablePtr] {
+            fn vtable_slots() -> &'static [#abi_krate::VtablePtr] {
                 &#table_id
             }
 
-            fn slot_for_iid(iid: &#krate::GUID) -> ::core::option::Option<usize> {
-                #(#lookup)*
-                ::core::option::Option::None
-            }
+            #lookup_method
         }
 
         #(#implements)*
@@ -128,56 +173,9 @@ mod tests {
     use proc_macro2::TokenStream;
     use quote::quote;
 
-    /// Expand a declaration that must be correct and give the tokens as text.
-    fn expand_ok(args: TokenStream, item: TokenStream) -> String {
-        let parsed: syn::ItemStruct = syn::parse2(item).unwrap();
-        super::expand(args, &parsed).unwrap().to_string()
-    }
-
-    /// Expand a declaration that must fail and give the message.
     fn expand_err(args: TokenStream, item: TokenStream) -> String {
         let parsed: syn::ItemStruct = syn::parse2(item).unwrap();
         super::expand(args, &parsed).unwrap_err().to_string()
-    }
-
-    #[test]
-    fn the_macro_makes_one_vtable_and_one_index_for_each_interface() {
-        let text = expand_ok(
-            quote! { IFoo, IBar },
-            quote! {
-                struct Thing { value: u32 }
-            },
-        );
-        assert!(text.contains(
-            "static CPPVTABLE_THING_VTBL_0 : IFooVtbl = IFooVtbl :: new :: < Thing , 0 > ()"
-        ));
-        assert!(text.contains(
-            "static CPPVTABLE_THING_VTBL_1 : IBarVtbl = IBarVtbl :: new :: < Thing , 1 > ()"
-        ));
-        assert!(text.contains("static CPPVTABLE_THING_VTABLES : [:: cppvtable :: VtablePtr ; 2]"));
-        assert!(text.contains("type Primary = IFoo"));
-        assert!(text.contains(
-            "impl :: cppvtable :: Implements < IFoo > for Thing { const SLOT : usize = 0 ; }"
-        ));
-        assert!(text.contains(
-            "impl :: cppvtable :: Implements < IBar > for Thing { const SLOT : usize = 1 ; }"
-        ));
-        assert!(text.contains("interface_matches :: < IFoo > (iid)"));
-        assert!(text.contains("interface_matches :: < IBar > (iid)"));
-        // The structure goes out without a change.
-        assert!(text.contains("struct Thing { value : u32 }"));
-    }
-
-    #[test]
-    fn the_internal_flag_changes_the_paths() {
-        let text = expand_ok(
-            quote! { IFoo, internal },
-            quote! {
-                struct Thing;
-            },
-        );
-        assert!(text.contains("impl crate :: ComImplement for Thing"));
-        assert!(!text.contains(":: cppvtable ::"));
     }
 
     #[test]

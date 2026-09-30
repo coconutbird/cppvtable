@@ -17,9 +17,8 @@ pub struct ForwardState;
 /// The child has no counts of its own. The container owns the child with an
 /// [`crate::OwnedObject`] handle and destroys it with itself.
 ///
-/// [`RefCounted::container`] gives the interface pointer of the container. A type that
-/// returns `None` is a plain object that a Rust owner holds: `AddRef` and `Release` then
-/// do nothing and return 1.
+/// [`RefCounted::container`] gives the interface pointer of the container. Returning
+/// `None` violates the policy contract and causes reference-count operations to panic.
 #[derive(Debug)]
 pub struct ForwardRefCount;
 
@@ -37,12 +36,12 @@ unsafe impl RefCountPolicy for ForwardRefCount {
         T: ComImplement + RefCounted<Policy = Self>,
     {
         // SAFETY: The caller owns a reference, so the object is live.
-        let container = unsafe { (*object).data() }.container();
+        let container = unsafe { (*object).data().container() };
         match container {
             // SAFETY: `container` gives a valid COM interface pointer of a live object.
             // The container is alive because it owns this child.
             Some(pointer) => unsafe { unknown_add_ref(pointer.as_ptr()) },
-            None => 1,
+            None => panic!("ForwardRefCount requires a live COM container"),
         }
     }
 
@@ -51,12 +50,12 @@ unsafe impl RefCountPolicy for ForwardRefCount {
         T: ComImplement + RefCounted<Policy = Self>,
     {
         // SAFETY: The caller owns a reference, so the object is live.
-        let container = unsafe { (*object).data() }.container();
+        let container = unsafe { (*object).data().container() };
         match container {
             // SAFETY: `container` gives a valid COM interface pointer, and the caller
             // owns the public reference of the container that this call removes.
             Some(pointer) => unsafe { unknown_release(pointer.as_ptr()) },
-            None => 1,
+            None => panic!("ForwardRefCount requires a live COM container"),
         }
     }
 

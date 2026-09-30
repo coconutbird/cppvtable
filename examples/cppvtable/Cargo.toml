@@ -12,7 +12,7 @@ workspace = true
 
 [dependencies]
 cpp = { workspace = true }
-cppvtable = { workspace = true }
+cppvtable.workspace = true
 
 [build-dependencies]
 cpp_build = { workspace = true }

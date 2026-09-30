@@ -7,7 +7,7 @@
 use core::ffi::c_void;
 use core::mem::{offset_of, size_of};
 
-use cppvtable::{ComObject, ComPtr, RefCounted, SingleRefCount, implement, interface};
+use cppvtable_com::{ComObject, ComPtr, RefCounted, SingleRefCount, implement, interface};
 
 /// An interface with holes in the slot numbers.
 #[interface(abi = com, iid = "51075001-0000-4000-8000-000000000001")]
@@ -33,7 +33,8 @@ pub unsafe trait ISparseChild {
 #[implement(ISparseChild)]
 struct Sparse;
 
-impl RefCounted for Sparse {
+// SAFETY: Hooks obey the reference-count contract and all returned pointers stay live.
+unsafe impl RefCounted for Sparse {
     type Policy = SingleRefCount;
 }
 

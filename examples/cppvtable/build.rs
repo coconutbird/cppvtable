@@ -3,5 +3,5 @@
 fn main() {
     // Build inline C++ code from the example binary.
     println!("cargo:rerun-if-changed=src/main.rs");
-    cpp_build::build("src/main.rs");
+    cpp_build::Config::new().build("src/main.rs");
 }

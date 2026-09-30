@@ -14,9 +14,9 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread;
 
-use cppvtable::{
-    ComObject, ComPtr, DualRefCount, IUnknownVtbl, PrivateRef, RefCounted, SingleRefCount,
-    implement, interface,
+use cppvtable_com::{
+    AgileInterface, ComObject, ComPtr, DualRefCount, IUnknownVtbl, PrivateRef, RefCounted,
+    SingleRefCount, implement, interface,
 };
 
 /// The number of threads of each test.
@@ -31,6 +31,9 @@ pub unsafe trait IStress {
     /// Give the value of the object.
     fn Value(&self) -> u32;
 }
+
+// SAFETY: Every test object uses atomic data and permits concurrent calls and destruction.
+unsafe impl AgileInterface for IStress {}
 
 /// The counters of the test.
 #[derive(Default)]
@@ -74,14 +77,15 @@ struct Single {
     counters: Arc<Counters>,
 }
 
-impl RefCounted for Single {
+// SAFETY: Hooks obey the reference-count contract and all returned pointers stay live.
+unsafe impl RefCounted for Single {
     type Policy = SingleRefCount;
 
-    fn on_first_public_ref(&self) {
+    unsafe fn on_first_public_ref(&self) {
         self.counters.hook(true);
     }
 
-    fn on_last_public_release(&self) {
+    unsafe fn on_last_public_release(&self) {
         self.counters.hook(false);
     }
 }
@@ -105,14 +109,15 @@ struct Dual {
     counters: Arc<Counters>,
 }
 
-impl RefCounted for Dual {
+// SAFETY: Hooks obey the reference-count contract and all returned pointers stay live.
+unsafe impl RefCounted for Dual {
     type Policy = DualRefCount;
 
-    fn on_first_public_ref(&self) {
+    unsafe fn on_first_public_ref(&self) {
         self.counters.hook(true);
     }
 
-    fn on_last_public_release(&self) {
+    unsafe fn on_last_public_release(&self) {
         self.counters.hook(false);
     }
 }

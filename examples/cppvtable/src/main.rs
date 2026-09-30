@@ -1,28 +1,26 @@
-//! A bidirectional C++ ABI example for `cppvtable`.
+//! A bidirectional C++ ABI example using the `cppvtable` crate.
 //!
-//! Rust declares the C++ interface with `#[interface(abi = cpp)]`. The inline C++ code
-//! implements it once in C++ and also calls a Rust object that implements the same
-//! interface. `cpp_build` compiles the inline C++ with the example.
+//! Rust uses `cppvtable::interface` to call a native C++ object and
+//! `#[implement]` to expose a Rust object through a
+//! C++-compatible vtable. `cpp_build` compiles the inline C++.
 
 use cpp::cpp;
-use cppvtable::{ForwardRefCount, OwnedObject, RefCounted, implement, interface};
+use cppvtable::{OwnedObject, implement};
 use std::ffi::c_void;
 use std::io::{self, Write};
 
-/// The C++ interface shared by the C++ and Rust objects below.
-#[interface(abi = cpp)]
-unsafe trait IAnimal {
+/// The shared declaration for C++ implementations and the Rust implementation.
+#[cppvtable::interface(abi = cpp)]
+pub unsafe trait IAnimal {
+    /// Speak through the C++ vtable.
     fn speak(&self);
+    /// Give the number of legs.
     fn legs(&self) -> i32;
 }
 
 #[implement(IAnimal)]
 struct RustDog {
     name: String,
-}
-
-impl RefCounted for RustDog {
-    type Policy = ForwardRefCount;
 }
 
 impl IAnimalImpl for RustDog {
@@ -40,8 +38,7 @@ cpp! {{
     #include <cstdio>
     #include <string>
 
-    // Keep this method order and signature in sync with the Rust interface above.
-    // There is intentionally no virtual destructor: it would add another vtable slot.
+    // Keep the method order and signature in sync with the Rust ABI declarations.
     class IAnimal {
     public:
         virtual void speak() = 0;
@@ -56,6 +53,7 @@ cpp! {{
 
         void speak() override {
             std::printf("CppDog '%s' says: Woof from C++!\n", name.c_str());
+            std::fflush(stdout);
         }
 
         int legs() override {

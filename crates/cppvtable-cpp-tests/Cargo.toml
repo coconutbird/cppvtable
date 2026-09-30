@@ -2,7 +2,7 @@
 name = "cppvtable-cpp-tests"
 version.workspace = true
 edition.workspace = true
-description = "C++ interop tests for cppvtable (requires MSVC)"
+description = "C and C++ compiler interoperability tests for cppvtable"
 license.workspace = true
 repository.workspace = true
 publish = false
@@ -12,8 +12,10 @@ workspace = true
 
 [dependencies]
 cpp = { workspace = true }
-cppvtable = { workspace = true }
+cppvtable.workspace = true
+cppvtable-abi.workspace = true
+cppvtable-com.workspace = true
 
 [build-dependencies]
 cpp_build = { workspace = true }
-
+cc.workspace = true

@@ -75,7 +75,7 @@ pub use dual::{DualRefCount, DualState};
 pub use forward::{ForwardRefCount, ForwardState};
 pub use single::{SingleRefCount, SingleState};
 
-use crate::guid::GUID;
+use crate::GUID;
 use crate::object::{ComImplement, ComObject};
 
 /// The counts of one object and the operations on them.
@@ -86,6 +86,8 @@ use crate::object::{ComImplement, ComObject};
 ///
 /// An implementation must destroy the object exactly one time, and only after the last
 /// reference is gone. Use [`crate::ComObject::destroy`] for the destruction.
+/// Invoke lifecycle hooks only on the data of a live `ComObject`, during the public
+/// count transition described by the hook, and retain the allocation until it returns.
 pub unsafe trait RefCountPolicy: Sized + 'static {
     /// The counts that [`ComObject`] holds for this policy.
     type State: Send + Sync + 'static;
@@ -180,19 +182,28 @@ pub unsafe trait StandalonePolicy: RefCountPolicy {}
 /// Each type that `#[implement]` uses must implement this trait.
 ///
 /// ```ignore
-/// impl RefCounted for VertexBuffer {
+/// unsafe impl RefCounted for VertexBuffer {
 ///     type Policy = DualRefCount;
 ///
-///     fn on_first_public_ref(&self) {
+///     unsafe fn on_first_public_ref(&self) {
 ///         self.device.add_public_ref();
 ///     }
 ///
-///     fn on_last_public_release(&self) {
+///     unsafe fn on_last_public_release(&self) {
 ///         self.device.release_public_ref();
 ///     }
 /// }
 /// ```
-pub trait RefCounted: Sized + 'static {
+/// # Safety
+///
+/// `container` and `query_extra` must return valid live COM interface pointers. A
+/// `query_extra` pointer must own one public reference. With `ForwardRefCount`, the
+/// container must own the child handle and retain it until the container is destroyed;
+/// every public child reference must keep that container alive. The hooks must not
+/// change the public count of their own object. If any implemented interface is an
+/// [`crate::AgileInterface`], `Self` must implement `Send + Sync` and its hooks must
+/// support concurrent calls and destruction on arbitrary threads.
+pub unsafe trait RefCounted: Sized + 'static {
     /// The reference count policy of the type.
     type Policy: RefCountPolicy;
 
@@ -200,29 +211,49 @@ pub trait RefCounted: Sized + 'static {
     ///
     /// The hook must not add or remove a public reference of its own object. See the
     /// rules of this module.
-    fn on_first_public_ref(&self) {}
+    ///
+    /// # Safety
+    ///
+    /// `self` must be the data of a live `ComObject` whose public count is making the
+    /// transition from zero to one. The allocation must stay alive during the hook.
+    unsafe fn on_first_public_ref(&self) {}
 
     /// The public count went from 1 to 0.
     ///
     /// The object is still alive. The hook may release the references that it holds of
     /// other objects. The hook must not add or remove a public reference of its own
     /// object.
-    fn on_last_public_release(&self) {}
+    ///
+    /// # Safety
+    ///
+    /// `self` must be the data of a live `ComObject` whose public count is making the
+    /// transition from one to zero. The allocation must stay alive during the hook.
+    unsafe fn on_last_public_release(&self) {}
 
     /// Give an interface pointer of the container.
     ///
     /// [`ForwardRefCount`] sends `AddRef` and `Release` to this pointer. A type with
-    /// another policy does not use the hook. A plain C++ object that no container owns
-    /// returns `None`.
-    fn container(&self) -> Option<NonNull<c_void>> {
+    /// another policy does not use the hook. With `ForwardRefCount` this must return
+    /// a valid container; the default is only for policies that do not forward.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be the data of a live `ComObject`. The caller must keep the object
+    /// and its container alive while using the returned pointer.
+    unsafe fn container(&self) -> Option<NonNull<c_void>> {
         None
     }
 
     /// Answer `QueryInterface` for an interface that the object does not implement.
     ///
     /// The generated `QueryInterface` calls this hook after it looks in its own table.
-    /// The hook must add the reference of the pointer that it returns.
-    fn query_extra(&self, iid: &GUID) -> Option<NonNull<c_void>> {
+    /// The hook must add the reference of the pointer that it returns, and the pointer
+    /// must support the interface identified by `iid` with its required vtable layout.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be the data of a live `ComObject` kept alive throughout the call.
+    unsafe fn query_extra(&self, iid: &GUID) -> Option<NonNull<c_void>> {
         let _ = iid;
         None
     }

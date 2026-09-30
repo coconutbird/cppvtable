@@ -9,10 +9,10 @@ use core::mem::size_of;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use cppvtable::{
-    ComObject, ComPtr, GUID, IUnknown, Interface, RefCounted, SingleRefCount, implement, interface,
-    interface_of,
+use cppvtable_com::{
+    ComObject, ComPtr, IUnknown, RefCounted, SingleRefCount, implement, interface, interface_of,
 };
+use cppvtable_com::{GUID, Interface};
 
 /// The base of the first chain.
 #[interface(abi = com, iid = "a1a1a1a1-0000-4000-8000-000000000001")]
@@ -52,10 +52,11 @@ struct Multi {
     value: AtomicU32,
 }
 
-impl RefCounted for Multi {
+// SAFETY: Hooks obey the reference-count contract and all returned pointers stay live.
+unsafe impl RefCounted for Multi {
     type Policy = SingleRefCount;
 
-    fn query_extra(&self, iid: &GUID) -> Option<NonNull<c_void>> {
+    unsafe fn query_extra(&self, iid: &GUID) -> Option<NonNull<c_void>> {
         if *iid != EXTRA_IID {
             return None;
         }
@@ -187,7 +188,8 @@ fn as_impl_works_from_every_chain_and_refuses_another_type() {
 #[implement(IGamma)]
 struct Other;
 
-impl RefCounted for Other {
+// SAFETY: Hooks obey the reference-count contract and all returned pointers stay live.
+unsafe impl RefCounted for Other {
     type Policy = SingleRefCount;
 }
 
@@ -227,7 +229,8 @@ struct TwinA {
     value: AtomicU32,
 }
 
-impl RefCounted for TwinA {
+// SAFETY: Hooks obey the reference-count contract and all returned pointers stay live.
+unsafe impl RefCounted for TwinA {
     type Policy = SingleRefCount;
 }
 
@@ -244,7 +247,8 @@ struct TwinB {
     value: AtomicU32,
 }
 
-impl RefCounted for TwinB {
+// SAFETY: Hooks obey the reference-count contract and all returned pointers stay live.
+unsafe impl RefCounted for TwinB {
     type Policy = SingleRefCount;
 }
 
@@ -267,8 +271,8 @@ fn two_types_with_the_same_shape_keep_two_vtables() {
         value: AtomicU32::new(8),
     });
 
-    let first_vtable = <TwinA as cppvtable::ComImplement>::vtable_slots()[0].as_ptr();
-    let second_vtable = <TwinB as cppvtable::ComImplement>::vtable_slots()[0].as_ptr();
+    let first_vtable = <TwinA as cppvtable_com::ComImplement>::vtable_slots()[0].as_ptr();
+    let second_vtable = <TwinB as cppvtable_com::ComImplement>::vtable_slots()[0].as_ptr();
     assert!(
         !core::ptr::eq(first_vtable, second_vtable),
         "the two static vtables must keep two addresses"

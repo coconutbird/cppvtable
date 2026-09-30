@@ -19,7 +19,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use cppvtable::{
+use cppvtable_com::{
     ComObject, ComPtr, E_POINTER, HRESULT, PrivateRef, RefCounted, S_FALSE, S_OK, implement,
     interface, unknown_add_ref, unknown_release,
 };
@@ -69,10 +69,11 @@ struct Device {
     counters: Arc<Counters>,
 }
 
-impl RefCounted for Device {
-    type Policy = cppvtable::DualRefCount;
+// SAFETY: Hooks obey the reference-count contract and all returned pointers stay live.
+unsafe impl RefCounted for Device {
+    type Policy = cppvtable_com::DualRefCount;
 
-    fn on_last_public_release(&self) {
+    unsafe fn on_last_public_release(&self) {
         // The device clears its state. This releases the private references. The lock
         // is free again before the private reference goes away, because a destructor
         // must not run while the device holds the lock.
@@ -142,10 +143,11 @@ impl Texture {
     }
 }
 
-impl RefCounted for Texture {
-    type Policy = cppvtable::DualRefCount;
+// SAFETY: Hooks obey the reference-count contract and all returned pointers stay live.
+unsafe impl RefCounted for Texture {
+    type Policy = cppvtable_com::DualRefCount;
 
-    fn on_first_public_ref(&self) {
+    unsafe fn on_first_public_ref(&self) {
         self.counters.texture_first.fetch_add(1, Ordering::Relaxed);
         // The Direct3D 9 rule: a live resource keeps the device alive.
         // SAFETY: The device is alive. Either the device holds a private reference of
@@ -153,7 +155,7 @@ impl RefCounted for Texture {
         unsafe { unknown_add_ref(self.device()) };
     }
 
-    fn on_last_public_release(&self) {
+    unsafe fn on_last_public_release(&self) {
         self.counters.texture_last.fetch_add(1, Ordering::Relaxed);
         // SAFETY: This texture owns the public reference of the device that the call
         // removes.

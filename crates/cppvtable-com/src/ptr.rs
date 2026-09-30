@@ -13,7 +13,9 @@ use core::marker::PhantomData;
 use core::ops::Deref;
 use core::ptr::NonNull;
 
-use crate::interface::{IUnknownVtbl, Interface, unknown_add_ref, unknown_release};
+use crate::interface::{
+    AgileInterface, ComInterface, IUnknownVtbl, unknown_add_ref, unknown_release,
+};
 use crate::object::{ComImplement, ComObject, Implements};
 use crate::refcount::{PrivatePolicy, RefCountPolicy};
 
@@ -61,25 +63,29 @@ pub unsafe fn object_of_raw<T: ComImplement>(raw: *mut c_void) -> Option<*const 
 /// The type is `#[repr(transparent)]` over one non-null pointer, so
 /// `Option<ComPtr<I>>` has the size of a pointer.
 ///
-/// `ComPtr` can also hold a `cpp` or `c` interface pointer, but it does not retain the
-/// foreign object's lifetime or change a reference count. Borrow those pointers with
-/// `I::from_raw_ref` while the caller keeps the object alive.
+/// Moving a pointer across threads requires an explicit [`AgileInterface`] contract.
+/// `IUnknown` itself has no such contract:
+///
+/// ```compile_fail
+/// use cppvtable_com::{ComPtr, IUnknown};
+/// fn require_send<T: Send>() {}
+/// require_send::<ComPtr<IUnknown>>();
+/// ```
 #[repr(transparent)]
-pub struct ComPtr<I: Interface> {
+pub struct ComPtr<I: ComInterface> {
     /// The interface pointer.
     ptr: NonNull<c_void>,
     /// The interface type.
     marker: PhantomData<I>,
 }
 
-// SAFETY: The crate makes objects whose counts are atomic and whose methods take
-// `&self`. A COM object of the application is free threaded or the caller obeys its
-// apartment rules.
-unsafe impl<I: Interface> Send for ComPtr<I> {}
+// SAFETY: `AgileInterface` guarantees that its objects support use and destruction on
+// any thread, including concurrent reference-count operations.
+unsafe impl<I: AgileInterface> Send for ComPtr<I> {}
 // SAFETY: See the implementation of `Send`.
-unsafe impl<I: Interface> Sync for ComPtr<I> {}
+unsafe impl<I: AgileInterface> Sync for ComPtr<I> {}
 
-impl<I: Interface> ComPtr<I> {
+impl<I: ComInterface> ComPtr<I> {
     /// Take ownership of a raw interface pointer.
     ///
     /// The call does not add a reference. Use it for a pointer that a COM method gave
@@ -125,10 +131,8 @@ impl<I: Interface> ComPtr<I> {
     #[must_use]
     pub unsafe fn from_raw_add_ref(raw: *mut c_void) -> Option<Self> {
         let ptr = NonNull::new(raw)?;
-        if I::IS_COM {
-            // SAFETY: The caller gives a valid COM interface pointer.
-            unsafe { unknown_add_ref(ptr.as_ptr()) };
-        }
+        // SAFETY: The caller gives a valid COM interface pointer.
+        unsafe { unknown_add_ref(ptr.as_ptr()) };
         Some(Self {
             ptr,
             marker: PhantomData,
@@ -177,13 +181,10 @@ impl<I: Interface> ComPtr<I> {
 
     /// Ask the object for another interface.
     ///
-    /// The method calls `QueryInterface`. It gives `None` when the object does not have
-    /// the interface, and when `I` or `J` is not a COM interface.
+    /// The method calls `QueryInterface` and gives `None` when the object does not have
+    /// the requested interface.
     #[must_use]
-    pub fn cast<J: Interface>(&self) -> Option<ComPtr<J>> {
-        if !I::IS_COM || !J::IS_COM {
-            return None;
-        }
+    pub fn cast<J: ComInterface>(&self) -> Option<ComPtr<J>> {
         let iid = J::IID;
         let mut out: *mut c_void = core::ptr::null_mut();
         // SAFETY: The pointer is a valid COM interface pointer, so slot 0 of its vtable
@@ -225,12 +226,10 @@ impl<I: Interface> ComPtr<I> {
     }
 }
 
-impl<I: Interface> Clone for ComPtr<I> {
+impl<I: ComInterface> Clone for ComPtr<I> {
     fn clone(&self) -> Self {
-        if I::IS_COM {
-            // SAFETY: The `ComPtr` holds a valid COM interface pointer of a live object.
-            unsafe { unknown_add_ref(self.ptr.as_ptr()) };
-        }
+        // SAFETY: The `ComPtr` holds a valid COM interface pointer of a live object.
+        unsafe { unknown_add_ref(self.ptr.as_ptr()) };
         Self {
             ptr: self.ptr,
             marker: PhantomData,
@@ -238,16 +237,14 @@ impl<I: Interface> Clone for ComPtr<I> {
     }
 }
 
-impl<I: Interface> Drop for ComPtr<I> {
+impl<I: ComInterface> Drop for ComPtr<I> {
     fn drop(&mut self) {
-        if I::IS_COM {
-            // SAFETY: The `ComPtr` owns the public reference that this call removes.
-            unsafe { unknown_release(self.ptr.as_ptr()) };
-        }
+        // SAFETY: The `ComPtr` owns the public reference that this call removes.
+        unsafe { unknown_release(self.ptr.as_ptr()) };
     }
 }
 
-impl<I: Interface> Deref for ComPtr<I> {
+impl<I: ComInterface> Deref for ComPtr<I> {
     type Target = I;
 
     #[inline]
@@ -258,19 +255,19 @@ impl<I: Interface> Deref for ComPtr<I> {
     }
 }
 
-impl<I: Interface> fmt::Debug for ComPtr<I> {
+impl<I: ComInterface> fmt::Debug for ComPtr<I> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "ComPtr<{}>({:p})", I::NAME, self.ptr.as_ptr())
     }
 }
 
-impl<I: Interface> PartialEq for ComPtr<I> {
+impl<I: ComInterface> PartialEq for ComPtr<I> {
     fn eq(&self, other: &Self) -> bool {
         self.ptr == other.ptr
     }
 }
 
-impl<I: Interface> Eq for ComPtr<I> {}
+impl<I: ComInterface> Eq for ComPtr<I> {}
 
 /// An owning private reference of an object of this process.
 ///
@@ -335,7 +332,7 @@ where
     ///
     /// A pointer to a foreign object gives `None`.
     #[must_use]
-    pub fn from_com_ptr<I: Interface>(pointer: &ComPtr<I>) -> Option<Self> {
+    pub fn from_com_ptr<I: ComInterface>(pointer: &ComPtr<I>) -> Option<Self> {
         // SAFETY: A `ComPtr` holds a valid interface pointer of a live object.
         unsafe { Self::from_raw(pointer.as_raw()) }
     }
@@ -372,7 +369,7 @@ where
     /// Give the interface pointer of `I` without a change of a count.
     #[inline]
     #[must_use]
-    pub fn as_raw<I: Interface>(&self) -> *mut c_void
+    pub fn as_raw<I: ComInterface>(&self) -> *mut c_void
     where
         T: Implements<I>,
     {
@@ -385,7 +382,7 @@ where
     /// This is how `GetTexture` and equivalent methods answer. When the public count was
     /// zero, [`crate::RefCounted::on_first_public_ref`] fires again.
     #[must_use]
-    pub fn to_public<I: Interface>(&self) -> ComPtr<I>
+    pub fn to_public<I: ComInterface>(&self) -> ComPtr<I>
     where
         T: Implements<I>,
     {

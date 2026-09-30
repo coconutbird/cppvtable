@@ -1,12 +1,7 @@
-//! The `GUID` type.
+//! The ABI representation of a 128-bit interface or class identifier.
 //!
-//! A GUID is a 128-bit number. COM uses it to identify an interface (an IID) or a class
-//! (a CLSID). The layout is the layout of the Win32 `GUID` structure: one `u32`, two
-//! `u16`, and eight bytes.
-//!
-//! With the feature `windows-compat` the crate uses `windows_core::GUID`. The two types
-//! have the same layout and the same constructors, so code that uses this module works
-//! with both.
+//! COM uses this layout for IIDs and CLSIDs.
+//! With `windows-compat`, this name is `windows_core::GUID`.
 
 #[cfg(feature = "windows-compat")]
 pub use windows_core::GUID;
@@ -18,9 +13,7 @@ pub use own::GUID;
 mod own {
     use core::fmt;
 
-    /// A 128-bit identifier of an interface or a class.
-    ///
-    /// The layout is the layout of the Win32 `GUID` structure.
+    /// A 128-bit identifier with the layout of the Win32 `GUID` structure.
     #[repr(C)]
     #[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
     pub struct GUID {

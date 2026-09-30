@@ -1,22 +1,41 @@
 //! C++ interop tests for cppvtable
 //!
-//! This crate verifies that cppvtable's vtable layout matches MSVC's C++ vtable layout.
-//! Requires MSVC to build and run.
+//! Exercises matching method-only interfaces using the target C++ compiler.
+//! Supports MSVC, clang-cl, and Clang with the Itanium ABI.
 //!
 //! Run with: `cargo test -p cppvtable-cpp-tests`
 
 #![recursion_limit = "512"]
 
 use cpp::cpp;
-use cppvtable::{ForwardRefCount, RefCounted, implement, interface};
+#[cfg(test)]
+use cppvtable::{implement, interface};
+use cppvtable_abi::interface as abi_interface;
 use std::ffi::c_void;
 
 #[cfg(test)]
+mod c_table;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "compiler fixtures are used in tests")
+)]
+mod com;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "compiler fixtures are used in tests")
+)]
+mod inheritance;
+#[cfg(test)]
 mod multi;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "compiler fixtures are used in tests")
+)]
+mod returns;
 #[cfg(test)]
 mod single;
 
-// C++ code compiled by MSVC
+// C++ code compiled by the target compiler
 
 cpp! {{
     #include <cstdio>
@@ -30,12 +49,12 @@ cpp! {{
     };
 
     // Concrete C++ implementation
-    class CppDog : public ICppAnimal {
+    class CppDog final : public ICppAnimal {
     public:
         char name[32];
 
         CppDog(const char* n) {
-            strncpy_s(name, sizeof(name), n, _TRUNCATE);
+            std::snprintf(name, sizeof(name), "%s", n);
         }
 
         void speak() override {
@@ -47,7 +66,7 @@ cpp! {{
         }
     };
 
-    class CppCat : public ICppAnimal {
+    class CppCat final : public ICppAnimal {
     public:
         int lives;
 
@@ -77,7 +96,7 @@ cpp! {{
     };
 
     // Duck implements both ISwimmer and IFlyer (multiple inheritance)
-    class CppDuck : public ISwimmer, public IFlyer {
+    class CppDuck final : public ISwimmer, public IFlyer {
     public:
         int speed;
 
@@ -135,9 +154,9 @@ fn cpp_call_legs(animal: *mut c_void) -> i32 {
     not(test),
     expect(dead_code, reason = "compiled for cpp_build and used in tests")
 )]
-fn delete_cpp_animal(animal: *mut c_void) {
+fn delete_cpp_dog(animal: *mut c_void) {
     cpp!(unsafe [animal as "ICppAnimal*"] {
-        delete animal;
+        delete static_cast<CppDog*>(animal);
     });
 }
 
@@ -214,39 +233,63 @@ fn cpp_call_fly_speed(flyer: *mut c_void) -> i32 {
 
 // Rust interfaces matching the C++ classes
 
+#[cfg(test)]
 #[interface(abi = cpp)]
 unsafe trait IAnimal {
     fn speak(&self);
     fn legs(&self) -> i32;
 }
 
+/// A borrowed ABI wrapper for the C++ animal implementation.
+#[abi_interface(abi = cpp)]
+pub unsafe trait IForeignAnimal {
+    /// Speak through the C++ vtable.
+    fn speak(&self);
+    /// Give the number of legs.
+    fn legs(&self) -> i32;
+}
+
+#[cfg(test)]
 #[interface(abi = cpp)]
 unsafe trait ISwimmer {
     fn swim_speed(&self) -> i32;
     fn swim(&self);
 }
 
+#[cfg(test)]
 #[interface(abi = cpp)]
 unsafe trait IFlyer {
     fn fly_speed(&self) -> i32;
     fn fly(&self);
 }
 
+/// A borrowed ABI wrapper for the C++ swimmer implementation.
+#[abi_interface(abi = cpp)]
+pub unsafe trait IForeignSwimmer {
+    /// Give the swim speed.
+    fn swim_speed(&self) -> i32;
+    /// Swim.
+    fn swim(&self);
+}
+
+/// A borrowed ABI wrapper for the C++ flyer implementation.
+#[abi_interface(abi = cpp)]
+pub unsafe trait IForeignFlyer {
+    /// Give the fly speed.
+    fn fly_speed(&self) -> i32;
+    /// Fly.
+    fn fly(&self);
+}
+
 // Rust objects exposed through C++ interfaces
 
+#[cfg(test)]
 #[implement(ISwimmer, IFlyer)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used only by the C++ interop tests")
-)]
 struct Duck {
     speed: i32,
 }
 
-impl RefCounted for Duck {
-    type Policy = ForwardRefCount;
-}
-
+#[cfg(test)]
 impl ISwimmerImpl for Duck {
     fn swim_speed(&self) -> i32 {
         self.speed
@@ -257,6 +300,7 @@ impl ISwimmerImpl for Duck {
     }
 }
 
+#[cfg(test)]
 impl IFlyerImpl for Duck {
     fn fly_speed(&self) -> i32 {
         self.speed * 2
@@ -267,29 +311,20 @@ impl IFlyerImpl for Duck {
     }
 }
 
+#[cfg(test)]
 impl Duck {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used only by the C++ interop tests")
-    )]
     fn new(speed: i32) -> Self {
         Self { speed }
     }
 }
 
+#[cfg(test)]
 #[implement(IAnimal)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used only by the C++ interop tests")
-)]
 struct Dog {
     name: [u8; 32],
 }
 
-impl RefCounted for Dog {
-    type Policy = ForwardRefCount;
-}
-
+#[cfg(test)]
 impl IAnimalImpl for Dog {
     fn speak(&self) {
         let name_len = self.name.iter().position(|&b| b == 0).unwrap_or(32);
@@ -302,11 +337,8 @@ impl IAnimalImpl for Dog {
     }
 }
 
+#[cfg(test)]
 impl Dog {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used only by the C++ interop tests")
-    )]
     fn new(name: &str) -> Self {
         let mut dog = Self { name: [0_u8; 32] };
         let bytes = name.as_bytes();
@@ -316,19 +348,13 @@ impl Dog {
     }
 }
 
+#[cfg(test)]
 #[implement(IAnimal)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used only by the C++ interop tests")
-)]
 struct Cat {
     lives: i32,
 }
 
-impl RefCounted for Cat {
-    type Policy = ForwardRefCount;
-}
-
+#[cfg(test)]
 impl IAnimalImpl for Cat {
     fn speak(&self) {
         println!("Cat with {} lives says: Meow!", self.lives);
@@ -339,12 +365,19 @@ impl IAnimalImpl for Cat {
     }
 }
 
+#[cfg(test)]
 impl Cat {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used only by the C++ interop tests")
-    )]
     fn new(lives: i32) -> Self {
         Self { lives }
     }
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "compiled for cpp_build and used in tests")
+)]
+fn delete_cpp_cat(animal: *mut c_void) {
+    cpp!(unsafe [animal as "ICppAnimal*"] {
+        delete static_cast<CppCat*>(animal);
+    });
 }
