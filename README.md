@@ -401,6 +401,13 @@ interfaces at compile time. `build` is unsafe because the caller must also match
 complete nonvirtual inheritance graph and every declared method contract; Itanium
 virtual inheritance cannot be detected without the C++ runtime and remains the
 caller's responsibility.
+
+RTTI-enabled Rust objects and shadow-hooked objects point at tables that are not the
+compiler's own. Clang 17 and later compile `dynamic_cast` to a `final` class as a
+comparison against the compiler's table address, which fails for these objects, so
+build C++ that casts them to `final` classes with `-fno-assume-unique-vtables`.
+MSVC and clang-cl always call the runtime.
+
 Native descriptors are treated as C++ treats `type_info`: static storage whose
 module stays loaded while it is used. Module unloading is not modeled; the source
 table and relative proxy only need to remain readable during extraction. Relative32
@@ -442,7 +449,8 @@ unless it was created from an `RttiClass`, so hook it with `with_prefix(.., 0)`.
 `HookMode` chooses where replacements go:
 
 - `Shadow` points this object at the copy, so other objects of the class are
-  unaffected and `typeid` and `dynamic_cast` keep working through the copied prefix.
+  unaffected and `typeid` and `dynamic_cast` keep working through the copied prefix
+  (with Clang, casts to `final` classes need `-fno-assume-unique-vtables`; see C++ RTTI).
 - `Patch` overwrites the shared table in place, affecting every object that uses it,
   and keeps the copy as a backup. It is not guaranteed to work: compiler vtables
   normally live in read-only memory, making it writable (for every edit and the drop)

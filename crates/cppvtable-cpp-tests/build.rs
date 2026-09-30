@@ -31,6 +31,12 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
         // Reference dynamic_cast failures are caught entirely inside the C++ fixture.
         native.flag("/EHsc");
+    } else {
+        // Clang 17+ compiles `dynamic_cast` to a `final` class as a comparison with the
+        // compiler's own table, which Rust RTTI objects and shadow-hooked objects never
+        // use; Clang 18 also miscompiles that shortcut through a private base. Make
+        // every cast consult the runtime, as the README requires of consumers.
+        native.flag_if_supported("-fno-assume-unique-vtables");
     }
     native.build("src/lib.rs");
     println!("cargo:rustc-check-cfg=cfg(has_relative_vtables)");

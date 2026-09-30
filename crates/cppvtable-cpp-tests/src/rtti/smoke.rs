@@ -137,6 +137,43 @@ fn native_rtti_and_rust_callbacks_survive_ownership_transfer() {
     assert_eq!(drops.load(Ordering::Relaxed), 1);
 }
 
+/// # Safety
+/// The pointers must be the primary and secondary interfaces of one live object with
+/// `CppvtableRttiOtherWitness` RTTI.
+unsafe fn casts_to_final_class(primary: *mut c_void, secondary: *mut c_void) -> bool {
+    cpp!(unsafe [primary as "CppvtableRttiRoot*", secondary as "CppvtableRttiSecondary*"] -> bool as "bool" {
+        auto* complete = dynamic_cast<CppvtableRttiOtherWitness*>(primary);
+        return static_cast<void*>(complete) == static_cast<void*>(primary)
+            && dynamic_cast<CppvtableRttiOtherWitness*>(secondary) == complete
+            && typeid(*secondary) == typeid(CppvtableRttiOtherWitness);
+    })
+}
+
+#[test]
+fn cpp_casts_a_rust_object_to_its_final_native_class() {
+    let [primary, secondary] = native_metadata(Class::OtherWitness);
+    // SAFETY: OtherWitness has the same two nonvirtual interface chains at the same
+    // offsets as Witness. Native callers use virtual callbacks only.
+    let class = unsafe {
+        RttiClass::<RustObject>::builder()
+            .with::<IDerived>(primary)
+            .with::<ISecondary>(secondary)
+            .build()
+    }
+    .unwrap();
+    let owner = RttiObject::new(
+        RustObject {
+            value: 5,
+            drops: Arc::default(),
+        },
+        &class,
+    );
+    // SAFETY: Both interfaces belong to the live object, which has OtherWitness RTTI.
+    assert!(unsafe {
+        casts_to_final_class(owner.as_raw::<IDerived>(), owner.as_raw::<ISecondary>())
+    });
+}
+
 #[test]
 fn objects_of_one_class_share_its_rtti_tables() {
     let class = witness_class();
