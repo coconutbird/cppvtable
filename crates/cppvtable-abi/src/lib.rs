@@ -34,4 +34,4 @@
 pub mod interface;
 
 pub use cppvtable_macro::interface_abi as interface;
-pub use interface::{Interface, VtablePtr, raw_of, vtable_of};
+pub use interface::{Interface, VtableLayout, VtablePtr, raw_of, vtable_of};

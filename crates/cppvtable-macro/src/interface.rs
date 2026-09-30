@@ -10,7 +10,7 @@ use syn::{Ident, ItemTrait, Path, Visibility};
 
 use crate::abi::{Abi, AbiVariant};
 use crate::parse::{
-    InterfaceArgs, InterfaceModel, Method, Runtime, derived_name, derived_path, shim_name,
+    InterfaceArgs, InterfaceModel, Layout, Method, Runtime, derived_name, derived_path, shim_name,
 };
 use crate::validate::{ReturnKind, needs_non_snake_case};
 
@@ -270,6 +270,7 @@ fn vtable_struct(
         #cfg
         #expect
         #[repr(C)]
+        #[derive(Clone, Copy)]
         #vis struct #vtbl_name {
             #base_field
             #(#fields)*
@@ -550,6 +551,28 @@ fn interface_trait_impl(
 ) -> TokenStream {
     let name = &model.name;
     let name_text = name.to_string();
+    let layout = match args.layout {
+        Layout::Pointer => quote! { #abi_crate::VtableLayout::Pointer },
+        Layout::Inline => quote! { #abi_crate::VtableLayout::Inline },
+    };
+    let base_layout_check = base.interface_type(krate).map(|base| quote! {
+        const _: () = assert!(
+            matches!(
+                (<#base as #abi_crate::Interface>::LAYOUT, <#name as #abi_crate::Interface>::LAYOUT),
+                (#abi_crate::VtableLayout::Pointer, #abi_crate::VtableLayout::Pointer)
+                    | (#abi_crate::VtableLayout::Inline, #abi_crate::VtableLayout::Inline)
+            ),
+            "derived and base interfaces must use the same vtable layout"
+        );
+    });
+    let inline_extent_check = (args.layout == Layout::Inline).then(|| {
+        quote! {
+            const _: () = assert!(
+                ::core::mem::size_of::<#vtbl_name>() > 0,
+                "an inline interface must have at least one function-pointer slot"
+            );
+        }
+    });
     let extra = if args.abi.is_com() {
         let guid = args.iid.as_ref().expect("COM arguments require an IID");
         let data1 = guid.data1;
@@ -587,8 +610,22 @@ fn interface_trait_impl(
                 || <#ty as #krate::CppInterface>::matches_type(id)
             }
         });
+        let (storage_type, storage_value) = if args.layout == Layout::Inline {
+            (quote! { #vtbl_name }, quote! { *vtable })
+        } else {
+            (
+                quote! { #abi_crate::VtablePtr },
+                quote! {
+                    #abi_crate::VtablePtr::new(::core::ptr::from_ref(vtable).cast::<::core::ffi::c_void>())
+                },
+            )
+        };
         quote! {
             unsafe impl #krate::CppInterface for #name {
+                type Storage = #storage_type;
+                fn storage(vtable: &'static Self::Vtbl) -> Self::Storage {
+                    #storage_value
+                }
                 fn matches_type(id: ::core::any::TypeId) -> bool {
                     id == ::core::any::TypeId::of::<Self>() #matches_base
                 }
@@ -601,7 +638,10 @@ fn interface_trait_impl(
         unsafe impl #abi_crate::Interface for #name {
             type Vtbl = #vtbl_name;
             const NAME: &'static str = #name_text;
+            const LAYOUT: #abi_crate::VtableLayout = #layout;
         }
+        #base_layout_check
+        #inline_extent_check
         #extra
     }
 }

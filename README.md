@@ -91,6 +91,56 @@ targets. These options do not provide cross-ABI calls within one process.
 `#[interface(abi = c)]` describes a C-compatible function table. The object begins
 with a pointer to that table; each function receives the object pointer first.
 
+For a C header that stores its function pointers directly inside the object, select
+`layout = inline`:
+
+```rust
+use cppvtable::{OwnedObject, implement, interface};
+
+#[interface(abi = c, layout = inline)]
+pub unsafe trait IInlineCounter {
+    /// Read the current value.
+    fn value(&self) -> u32;
+}
+
+#[implement(IInlineCounter)]
+struct Counter { value: u32 }
+
+impl IInlineCounterImpl for Counter {
+    fn value(&self) -> u32 { self.value }
+}
+
+fn main() {
+    let owner = OwnedObject::new(Counter { value: 42 });
+    let counter = owner.interface::<IInlineCounter>();
+    // SAFETY: The owner keeps the inline header and implementation alive.
+    assert_eq!(unsafe { counter.value() }, 42);
+    assert_eq!(counter.vtable().cast_mut().cast(), counter.as_raw());
+}
+```
+
+The matching C interface header contains the callback itself:
+
+```c
+#include <stdint.h>
+struct IInlineCounter {
+    uint32_t (*value)(struct IInlineCounter *self);
+};
+```
+
+The interface pointer addresses that header, so `vtable()` equals the interface
+address. `layout = pointer` is the default and addresses an object field containing
+a separate table pointer. Inline layout is available for `abi = c`; it supports
+`slots`, reserved entries, and `extends` with a base using the same layout.
+
+An implementation can combine independent pointer and inline interface chains.
+Each chain occupies its own header, and generated shims adjust their pointers back
+to the same Rust value. `OwnedObject` places those headers before its Rust value
+and preserves its alignment and lifetime. This does not generate arbitrary C data
+field layouts; foreign code accesses the declared interface header. Callback
+entries must stay immutable while Rust borrows the interface, including headers
+owned by foreign code.
+
 Override individual methods with `#[abi(convention = "system")]`, for example
 when a C table combines C and Windows system calls. The override applies to both
 the function-pointer field and the Rust implementation shim. On Windows x86,

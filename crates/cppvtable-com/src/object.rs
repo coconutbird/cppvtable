@@ -20,6 +20,7 @@
 //! then reads the Rust value. This is the `this` adjustment of a C++ object that has
 //! more than one base class.
 
+use alloc::boxed::Box;
 use core::ffi::c_void;
 use core::mem::{offset_of, size_of};
 use core::ptr::NonNull;

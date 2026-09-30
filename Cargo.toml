@@ -21,7 +21,7 @@ cppvtable = { version = "0.1.0", path = "crates/cppvtable" }
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "3", features = ["full", "extra-traits"] }
-windows-core = "0.62"
+windows-core = { version = "0.62", default-features = false }
 
 [workspace.lints.rust]
 warnings = { level = "deny", priority = -1 }

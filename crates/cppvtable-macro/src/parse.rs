@@ -18,6 +18,37 @@ const CONVENTIONS: &[&str] = &[
     "C", "system", "cdecl", "stdcall", "fastcall", "thiscall", "win64", "sysv64", "aapcs",
 ];
 
+/// Whether an interface pointer addresses a vtable pointer or the function table itself.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum Layout {
+    #[default]
+    Pointer,
+    Inline,
+}
+
+impl Layout {
+    fn parse(value: &Expr) -> Result<Self, syn::Error> {
+        match path_expr_name(value).as_deref() {
+            Some("pointer") => Ok(Self::Pointer),
+            Some("inline") => Ok(Self::Inline),
+            _ => Err(syn::Error::new(
+                value.span(),
+                "layout: use pointer or inline",
+            )),
+        }
+    }
+
+    pub(crate) fn validate(self, abi: Abi, span: Span) -> Result<(), syn::Error> {
+        if self == Self::Inline && abi != Abi::C {
+            return Err(syn::Error::new(
+                span,
+                "layout = inline is supported only with abi = c",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum Runtime {
     Abi,
@@ -29,6 +60,8 @@ pub(crate) enum Runtime {
 pub(crate) struct InterfaceArgs {
     /// The binary interface.
     pub(crate) abi: Abi,
+    /// Pointer indirection or a function table stored directly in the object.
+    pub(crate) layout: Layout,
     /// The interface identifier. A `cpp` or `c` interface may have none.
     pub(crate) iid: Option<GuidParts>,
     /// The base interface of the chain.
@@ -40,6 +73,21 @@ pub(crate) struct InterfaceArgs {
     pub(crate) slots: Option<usize>,
     /// The declaration is inside a runtime crate, so generated paths start with `crate`.
     pub(crate) internal: bool,
+}
+
+/// Parse the COM-only interface identifier argument.
+fn parse_iid_argument(value: &Expr) -> Result<GuidParts, syn::Error> {
+    let Expr::Lit(ExprLit {
+        lit: Lit::Str(text),
+        ..
+    }) = value
+    else {
+        return Err(syn::Error::new(
+            value.span(),
+            "iid: give the value as a string literal",
+        ));
+    };
+    parse_guid(&text.value(), text.span())
 }
 
 /// Parse an explicit total vtable extent.
@@ -68,6 +116,7 @@ impl InterfaceArgs {
         let mut root = false;
         let mut internal = false;
         let mut slots = None;
+        let mut layout = None;
 
         for item in &items {
             match item {
@@ -85,18 +134,17 @@ impl InterfaceArgs {
                         )
                     })?);
                 }
-                Meta::NameValue(pair) if pair.path.is_ident("iid") => {
-                    let Expr::Lit(ExprLit {
-                        lit: Lit::Str(text),
-                        ..
-                    }) = &pair.value
-                    else {
+                Meta::NameValue(pair) if pair.path.is_ident("layout") => {
+                    if layout.is_some() {
                         return Err(syn::Error::new(
-                            pair.value.span(),
-                            "iid: give the value as a string literal",
+                            pair.span(),
+                            "layout may be specified only once",
                         ));
-                    };
-                    iid = Some(parse_guid(&text.value(), text.span())?);
+                    }
+                    layout = Some(Layout::parse(&pair.value)?);
+                }
+                Meta::NameValue(pair) if pair.path.is_ident("iid") => {
+                    iid = Some(parse_iid_argument(&pair.value)?);
                 }
                 Meta::NameValue(pair) if pair.path.is_ident("slots") => {
                     if slots.is_some() {
@@ -116,7 +164,7 @@ impl InterfaceArgs {
                     return Err(syn::Error::new(
                         other.span(),
                         "unknown argument. Use `abi = com|cpp|msvc|itanium|c`, `iid = \"...\"`, \
-                         `extends(IBase)`, `slots = N`, `root`, or `internal`.",
+                         `layout = pointer|inline`, `extends(IBase)`, `slots = N`, `root`, or `internal`.",
                     ));
                 }
             }
@@ -128,6 +176,8 @@ impl InterfaceArgs {
                 "give the binary interface: `abi = com`, `cpp`, or `c`",
             )
         })?;
+        let layout = layout.unwrap_or_default();
+        layout.validate(abi, span)?;
         if abi.is_com() && iid.is_none() {
             return Err(syn::Error::new(
                 span,
@@ -148,6 +198,7 @@ impl InterfaceArgs {
         }
         Ok(Self {
             abi,
+            layout,
             iid,
             extends,
             root,

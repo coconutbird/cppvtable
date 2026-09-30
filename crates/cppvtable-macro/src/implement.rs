@@ -14,11 +14,11 @@
 //! The struct itself goes out without a change.
 
 use proc_macro2::{Literal, TokenStream};
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::spanned::Spanned;
 use syn::{Fields, ItemStruct};
 
-use crate::parse::{ImplementArgs, Runtime, derived_path, static_name};
+use crate::parse::{ImplementArgs, Runtime, derived_name, derived_path, static_name};
 
 /// Expand `#[implement(...)]` for the standalone COM runtime package.
 pub(crate) fn expand(args: TokenStream, item: &ItemStruct) -> Result<TokenStream, syn::Error> {
@@ -136,6 +136,8 @@ fn generate(args: &ImplementArgs, item: &ItemStruct, runtime: Runtime) -> TokenS
     });
 
     let primary = &args.interfaces[0];
+    let (storage_declaration, storage_type, storage_value, slot_offsets) =
+        storage_plan(args, item, &krate, &abi_krate, is_plain);
     let table_doc = format!(
         "The addresses of the static vtables of `{name_text}`. The order is the order of \
          the `#[implement]` list."
@@ -144,17 +146,19 @@ fn generate(args: &ImplementArgs, item: &ItemStruct, runtime: Runtime) -> TokenS
     quote! {
         #item
 
+        #storage_declaration
         #(#vtable_statics)*
 
         #[doc = #table_doc]
         static #table_id: [#abi_krate::VtablePtr; #count] = [#(#table_entries),*];
 
         unsafe impl #implementation for #name {
-            type Vtables = [#abi_krate::VtablePtr; #count];
+            type Vtables = #storage_type;
             type Primary = #primary;
+            #slot_offsets
 
             fn vtables() -> Self::Vtables {
-                #table_id
+                #storage_value
             }
 
             fn vtable_slots() -> &'static [#abi_krate::VtablePtr] {
@@ -165,6 +169,54 @@ fn generate(args: &ImplementArgs, item: &ItemStruct, runtime: Runtime) -> TokenS
         }
 
         #(#implements)*
+    }
+}
+
+/// Construct either native per-interface headers or the COM vtable-pointer array.
+fn storage_plan(
+    args: &ImplementArgs,
+    item: &ItemStruct,
+    krate: &TokenStream,
+    abi_krate: &TokenStream,
+    is_plain: bool,
+) -> (TokenStream, TokenStream, TokenStream, TokenStream) {
+    let name = &item.ident;
+    let count = Literal::usize_unsuffixed(args.interfaces.len());
+    let table_id = static_name(name, "VTABLES");
+    let storage_name = derived_name(name, "Vtables");
+    if is_plain {
+        let fields = args.interfaces.iter().enumerate().map(|(slot, interface)| {
+            let field = format_ident!("slot_{slot}");
+            quote! { #field: <#interface as #krate::CppInterface>::Storage, }
+        });
+        let values = args.interfaces.iter().enumerate().map(|(slot, interface)| {
+            let field = format_ident!("slot_{slot}");
+            let static_id = static_name(name, &format!("VTBL_{slot}"));
+            quote! { #field: <#interface as #krate::CppInterface>::storage(&#static_id), }
+        });
+        let offsets = (0..args.interfaces.len()).map(|slot| {
+            let field = format_ident!("slot_{slot}");
+            quote! { ::core::mem::offset_of!(#storage_name, #field) }
+        });
+        let vis = &item.vis;
+        (
+            quote! {
+                /// Interface headers stored at the start of the generated object allocation.
+                #[repr(C)]
+                #[derive(Clone, Copy)]
+                #vis struct #storage_name { #(#fields)* }
+            },
+            quote! { #storage_name },
+            quote! { #storage_name { #(#values)* } },
+            quote! { const SLOT_OFFSETS: &'static [usize] = &[#(#offsets),*]; },
+        )
+    } else {
+        (
+            TokenStream::new(),
+            quote! { [#abi_krate::VtablePtr; #count] },
+            quote! { #table_id },
+            TokenStream::new(),
+        )
     }
 }
 

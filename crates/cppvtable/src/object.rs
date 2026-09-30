@@ -1,9 +1,10 @@
 //! Stable C/C++ object allocations without reference counting.
 
+use alloc::boxed::Box;
 use core::any::TypeId;
 use core::ffi::c_void;
 use core::marker::PhantomData;
-use core::mem::{offset_of, size_of};
+use core::mem::offset_of;
 use core::ops::Deref;
 use core::ptr::NonNull;
 
@@ -16,8 +17,17 @@ use crate::{Interface, VtablePtr};
 /// # Safety
 ///
 /// `matches_type` may identify only `Self` and interfaces whose vtables are compatible
-/// prefixes of `Self::Vtbl`, with the same interface pointer representation.
+/// prefixes of `Self::Vtbl`, with the same interface pointer representation and layout.
+/// `Storage` must have the representation selected by `Self::LAYOUT`: one vtable
+/// pointer, or a nonempty inline `Self::Vtbl`. `storage` must preserve the supplied
+/// table's entries and may not retain or create ownership of anything else.
 pub unsafe trait CppInterface: Interface {
+    /// Object header for this interface: a vtable pointer or inline table entries.
+    type Storage: Copy + Send + Sync + 'static;
+
+    /// Initialize an object's interface header from its static table template.
+    fn storage(vtable: &'static Self::Vtbl) -> Self::Storage;
+
     /// Whether this interface chain can be borrowed as the interface identified by `id`.
     fn matches_type(id: TypeId) -> bool;
 }
@@ -26,24 +36,30 @@ pub unsafe trait CppInterface: Interface {
 ///
 /// # Safety
 ///
-/// `Vtables` must be a nonempty `[VtablePtr; N]` whose entries exactly match
-/// `vtable_slots`. Entry zero must use `Primary::Vtbl`. Every entry must point at an
-/// immutable live vtable whose shims adjust `this` to the correct [`Object<Self>`].
-/// `slot_for_type` must return only valid, prefix-compatible interface slots.
+/// `Vtables` must be a nonempty C-layout header containing one interface storage
+/// field per entry of `SLOT_OFFSETS` and `vtable_slots`. The offsets must identify
+/// those fields in order, with the primary interface at zero. Each field must use
+/// its interface's declared layout and the corresponding static table's entries.
+/// Every shim must adjust `this` to the correct [`Object<Self>`]. `slot_for_type`
+/// must return only valid, prefix-compatible interface slots.
 pub unsafe trait Implement: Sized + 'static {
-    /// Contiguous vtable pointers stored at the beginning of the object.
+    /// Interface headers stored at the beginning of the object.
     type Vtables: Copy + Send + Sync + 'static;
     /// Interface of the first vtable pointer.
     type Primary: CppInterface;
-    /// Initial vtable pointers for a new object.
+    /// Byte offsets of each interface header, in declaration order.
+    const SLOT_OFFSETS: &'static [usize];
+    /// Initial interface headers for a new object.
     fn vtables() -> Self::Vtables;
-    /// Addresses of the static vtables, in slot order.
+    /// Addresses of the static table templates, in interface order.
+    ///
+    /// Inline tables are copied from these templates into each object.
     fn vtable_slots() -> &'static [VtablePtr];
     /// Locate an implemented interface or one of its prefix-compatible ancestors.
     fn slot_for_type(id: TypeId) -> Option<usize>;
 }
 
-/// A directly implemented interface at a known vtable pointer slot.
+/// A directly implemented interface at a known interface header index.
 ///
 /// # Safety
 ///
@@ -53,10 +69,11 @@ pub unsafe trait Implements<I: CppInterface>: Implement {
     const SLOT: usize;
 }
 
-/// A C/C++ object consisting only of vtable pointers followed by its Rust value.
+/// A C/C++ object consisting of interface headers followed by its Rust value.
 ///
-/// Allocate using [`OwnedObject::new`]. Interface pointers refer to fields of this
-/// allocation, including secondary interface chains at later pointer slots.
+/// Allocate using [`OwnedObject::new`]. Each interface header contains either a
+/// pointer to a static table or inline table entries, as declared by that interface.
+/// Secondary interface chains have their own headers in this allocation.
 #[repr(C)]
 pub struct Object<T: Implement> {
     vtables: T::Vtables,
@@ -80,10 +97,12 @@ impl<T: Implement> Object<T> {
         &self.data
     }
 
-    /// Byte offset of the specified interface chain's vtable pointer.
+    /// Byte offset of the specified interface chain's header.
+    ///
+    /// Panics if `slot` is not a declared interface index.
     #[must_use]
     pub const fn slot_offset(slot: usize) -> usize {
-        offset_of!(Self, vtables) + slot * size_of::<VtablePtr>()
+        offset_of!(Self, vtables) + T::SLOT_OFFSETS[slot]
     }
 
     /// Get a raw interface pointer from a live object allocation.
@@ -106,7 +125,7 @@ impl<T: Implement> Object<T> {
     ///
     /// # Safety
     ///
-    /// `this` must point to the vtable pointer in slot `slot` of a live `Object<T>`.
+    /// `this` must point to the interface header in slot `slot` of a live `Object<T>`.
     /// The object must remain alive for the returned reference's lifetime.
     #[must_use]
     pub unsafe fn from_slot<'a>(this: *mut c_void, slot: usize) -> &'a Self {

@@ -28,6 +28,8 @@ mod conventions;
 )]
 mod inheritance;
 #[cfg(test)]
+mod inline;
+#[cfg(test)]
 mod multi;
 #[cfg_attr(
     not(test),

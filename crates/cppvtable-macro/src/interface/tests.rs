@@ -430,3 +430,64 @@ fn method_convention_override_rejects_unsupported_values_and_duplicates() {
             .contains("only once")
     );
 }
+
+#[test]
+fn inline_layout_is_explicit_and_c_only() {
+    let item: syn::ItemTrait =
+        syn::parse_quote! { unsafe trait IInline { fn value(&self) -> u32; } };
+    let native = super::expand_native(quote! { abi = c, layout = inline }, &item)
+        .unwrap()
+        .to_string();
+    assert!(native.contains("VtableLayout :: Inline"));
+    assert!(native.contains("type Storage = IInlineVtbl"));
+    assert!(native.contains("* vtable"));
+    let borrowed = super::expand_abi(quote! { abi = c, layout = inline }, &item)
+        .unwrap()
+        .to_string();
+    assert!(borrowed.contains("VtableLayout :: Inline"));
+    assert!(!borrowed.contains("CppInterface"));
+    for abi in [quote! { cpp }, quote! { msvc }, quote! { itanium }] {
+        assert!(
+            super::expand_native(quote! { abi = #abi, layout = inline }, &item)
+                .unwrap_err()
+                .to_string()
+                .contains("only with abi = c")
+        );
+    }
+    assert!(
+        super::expand(
+            quote! { abi = com, iid = "00000000-0000-0000-C000-000000000046", layout = inline },
+            &item,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("only with abi = c")
+    );
+}
+
+#[test]
+fn inline_layout_validates_layout_names_duplicates_and_base_contract() {
+    let item: syn::ItemTrait =
+        syn::parse_quote! { unsafe trait IInline { fn value(&self) -> u32; } };
+    assert!(
+        super::expand_native(quote! { abi = c, layout = embedded }, &item)
+            .unwrap_err()
+            .to_string()
+            .contains("pointer or inline")
+    );
+    assert!(
+        super::expand_native(quote! { abi = c, layout = inline, layout = pointer }, &item)
+            .unwrap_err()
+            .to_string()
+            .contains("only once")
+    );
+    let pointer = super::expand_native(quote! { abi = c, layout = pointer }, &item)
+        .unwrap()
+        .to_string();
+    assert!(pointer.contains("type Storage = :: cppvtable :: VtablePtr"));
+    let derived = super::expand_native(quote! { abi = c, layout = inline, extends(IBase) }, &item)
+        .unwrap()
+        .to_string();
+    assert!(derived.contains("derived and base interfaces must use the same vtable layout"));
+    assert!(derived.contains("an inline interface must have at least one function-pointer slot"));
+}

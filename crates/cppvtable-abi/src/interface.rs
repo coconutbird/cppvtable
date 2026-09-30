@@ -1,9 +1,18 @@
 //! Generic interface-pointer metadata for C and C++ vtables.
 //!
 //! An interface value is a transparent wrapper of one pointer. The pointer refers to a
-//! foreign object whose first field is a pointer to the interface vtable.
+//! foreign object containing either a vtable pointer or the vtable entries themselves.
 
 use core::ffi::c_void;
+
+/// Where an interface stores its function table relative to the interface pointer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VtableLayout {
+    /// The interface starts with a pointer to a separate table.
+    Pointer,
+    /// The table entries begin directly at the interface pointer, with no indirection.
+    Inline,
+}
 
 /// The address of a static vtable.
 ///
@@ -51,12 +60,16 @@ impl VtablePtr {
 /// Do not implement this trait by hand. The implementer must obey these rules:
 ///
 /// - `Self` is `#[repr(transparent)]` and holds exactly one `NonNull<c_void>`.
-/// - That pointer is a valid interface pointer. Its first field is a pointer to
-///   `Self::Vtbl`.
+/// - That pointer is a valid interface pointer with the representation selected by
+///   `LAYOUT`: either its first field points to `Self::Vtbl`, or it points directly
+///   to the inline `Self::Vtbl` prefix. The table must remain valid while borrowed.
 /// - `Vtbl` is `#[repr(C)]`. For a derived interface its first field is the base vtable.
 pub unsafe trait Interface: Sized + 'static {
     /// The vtable structure of the interface.
     type Vtbl: Sized + 'static;
+
+    /// The physical representation of the interface's function table.
+    const LAYOUT: VtableLayout = VtableLayout::Pointer;
 
     /// The name of the interface. Use it for log messages.
     const NAME: &'static str;
@@ -75,7 +88,11 @@ pub fn raw_of<I: Interface>(this: &I) -> *mut c_void {
 #[inline]
 #[must_use]
 pub fn vtable_of<I: Interface>(this: &I) -> *const I::Vtbl {
-    // SAFETY: `Interface` requires that the pointer refers to an object whose first
-    // field is a pointer to `I::Vtbl`.
-    unsafe { *raw_of(this).cast::<*const I::Vtbl>() }
+    match I::LAYOUT {
+        VtableLayout::Pointer => {
+            // SAFETY: This layout requires that the first field points to I::Vtbl.
+            unsafe { *raw_of(this).cast::<*const I::Vtbl>() }
+        }
+        VtableLayout::Inline => raw_of(this).cast::<I::Vtbl>(),
+    }
 }

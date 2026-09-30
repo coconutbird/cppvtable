@@ -99,9 +99,13 @@
 //! assert_eq!(unsafe { IReaderImpl::read(&reader, &input) }, 5);
 //! ```
 
+#![no_std]
+
+extern crate alloc;
+
 mod object;
 
-pub use cppvtable_abi::{Interface, VtablePtr, raw_of, vtable_of};
+pub use cppvtable_abi::{Interface, VtableLayout, VtablePtr, raw_of, vtable_of};
 pub use cppvtable_macro::{implement_native as implement, interface_native as interface};
 pub use object::{
     CppInterface, Implement, Implements, InterfaceRef, Object, OwnedObject, interface_of,

@@ -59,6 +59,10 @@
 //! Writer.Write(&raw mut output); // An unsafe implementation call requires `unsafe`.
 //! ```
 
+#![no_std]
+
+extern crate alloc;
+
 pub mod guid;
 pub mod hresult;
 pub mod interface;
@@ -66,7 +70,7 @@ pub mod object;
 pub mod ptr;
 pub mod refcount;
 
-pub use cppvtable_abi::{Interface, VtablePtr, raw_of, vtable_of};
+pub use cppvtable_abi::{Interface, VtableLayout, VtablePtr, raw_of, vtable_of};
 pub use cppvtable_macro::{implement, interface};
 pub use guid::GUID;
 

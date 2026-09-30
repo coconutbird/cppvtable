@@ -41,6 +41,9 @@ use proc_macro::TokenStream;
 /// - `slots = N`: total function-pointer entries, including the base vtable. Unknown
 ///   trailing entries are reserved to reach this extent. Without it, the vtable ends
 ///   after its last declared entry. An insufficient extent is a compile error.
+/// - `layout = pointer | inline`: `pointer` is the default vtable-pointer indirection.
+///   C interfaces may use `inline` when the object stores the function table directly.
+///   Inline tables must contain at least one slot; inherited layouts must agree.
 /// - `root`: the interface has no base. For COM, the runtime supplies the root vtable
 ///   builder; ordinary objects generate their own implementation shims.
 /// - `internal`: the paths of the generated code start with `crate`. Only the
