@@ -24,11 +24,13 @@
 //!   lock. The `Release` part of `unlock` and the `Acquire` part of the load give that.
 //! - A thread that makes the last transition must see all writes of every other thread,
 //!   because the destructor runs after it.
-//! - An `Acquire` load also stops the optimizer from moving the load out of the spin
-//!   loop. A `Relaxed` load in a loop that only waits is not safe against that.
+//! - The loads use `Acquire` for visibility of completed hooks. Atomicity alone does
+//!   not publish those writes to the next thread entering a transition.
 //!
-//! A stronger order never makes the count wrong. On x86 a read-modify-write always has
-//! the `lock` prefix, so the stronger order costs nothing there.
+//! The distinction is synchronization of other memory, rather than preventing atomic
+//! loads from being hoisted out of a loop. LLVM treats even monotonic atomic accesses
+//! as reads and writes for loop optimization; see its
+//! [atomic optimization guide](https://llvm.org/docs/Atomics.html#atomics-and-ir-optimization).
 
 use core::sync::atomic::{AtomicU32, Ordering};
 

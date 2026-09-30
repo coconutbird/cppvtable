@@ -19,7 +19,12 @@ unsafe trait IDerived {
 
 #[interface(abi = c)]
 unsafe trait ISecondary {
-    fn identity(&self) -> *mut c_void;
+    /// Return this object's primary interface pointer.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be the implementation field of a live `Object<Counter>`.
+    unsafe fn identity(&self) -> *mut c_void;
     #[slot(3)]
     fn set(&self, value: u32);
 }
@@ -48,7 +53,7 @@ impl IDerivedImpl for Counter {
 }
 
 impl ISecondaryImpl for Counter {
-    fn identity(&self) -> *mut c_void {
+    unsafe fn identity(&self) -> *mut c_void {
         unsafe { interface_of::<Self, IDerived>(self) }
     }
     fn set(&self, value: u32) {
@@ -78,6 +83,11 @@ fn inherited_and_secondary_vtables_recover_the_same_implementation() {
     assert_eq!(unsafe { primary.value() }, 17);
     assert_eq!(unsafe { primary.add(3) }, 20);
     assert_eq!(unsafe { secondary.identity() }, primary.as_raw());
+    // SAFETY: The value is borrowed from its live allocation, as identity requires.
+    assert_eq!(
+        unsafe { ISecondaryImpl::identity(owner.get()) },
+        primary.as_raw()
+    );
     unsafe {
         secondary.set(40);
     }

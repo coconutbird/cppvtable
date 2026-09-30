@@ -30,8 +30,11 @@ fn test_cpp_calls_rust_objects() {
     let rust_dog = OwnedObject::new(Dog::new("Buddy"));
     let rust_cat = OwnedObject::new(Cat::new(9));
 
-    assert_eq!(cpp_call_rust_legs(rust_dog.as_raw::<IAnimal>()), 4);
-    assert_eq!(cpp_call_rust_legs(rust_cat.as_raw::<IAnimal>()), 4);
+    // SAFETY: Each owning object keeps its matching animal interface alive.
+    unsafe {
+        assert_eq!(cpp_call_rust_legs(rust_dog.as_raw::<IAnimal>()), 4);
+        assert_eq!(cpp_call_rust_legs(rust_cat.as_raw::<IAnimal>()), 4);
+    }
 }
 
 /// Test that the primary interface vtable starts at offset zero.

@@ -13,6 +13,11 @@ use syn::{
 use crate::abi::Abi;
 use crate::validate::{GuidParts, ReturnKind, check_signature, classify_return, parse_guid};
 
+/// Stable foreign conventions accepted by per-method overrides.
+const CONVENTIONS: &[&str] = &[
+    "C", "system", "cdecl", "stdcall", "fastcall", "thiscall", "win64", "sysv64", "aapcs",
+];
+
 #[derive(Clone, Copy)]
 pub(crate) enum Runtime {
     Abi,
@@ -31,8 +36,25 @@ pub(crate) struct InterfaceArgs {
     /// The interface has no base and the crate supplies the vtable builder. Only
     /// `IUnknown` uses this.
     pub(crate) root: bool,
+    /// Total vtable pointer slots, including any base-interface prefix.
+    pub(crate) slots: Option<usize>,
     /// The declaration is inside a runtime crate, so generated paths start with `crate`.
     pub(crate) internal: bool,
+}
+
+/// Parse an explicit total vtable extent.
+fn parse_slot_extent(value: &Expr) -> Result<usize, syn::Error> {
+    let Expr::Lit(ExprLit {
+        lit: Lit::Int(integer),
+        ..
+    }) = value
+    else {
+        return Err(syn::Error::new(
+            value.span(),
+            "slots requires a nonnegative integer literal",
+        ));
+    };
+    integer.base10_parse()
 }
 
 impl InterfaceArgs {
@@ -45,6 +67,7 @@ impl InterfaceArgs {
         let mut extends = None;
         let mut root = false;
         let mut internal = false;
+        let mut slots = None;
 
         for item in &items {
             match item {
@@ -75,6 +98,15 @@ impl InterfaceArgs {
                     };
                     iid = Some(parse_guid(&text.value(), text.span())?);
                 }
+                Meta::NameValue(pair) if pair.path.is_ident("slots") => {
+                    if slots.is_some() {
+                        return Err(syn::Error::new(
+                            pair.span(),
+                            "slots may be specified only once",
+                        ));
+                    }
+                    slots = Some(parse_slot_extent(&pair.value)?);
+                }
                 Meta::List(list) if list.path.is_ident("extends") => {
                     extends = Some(syn::parse2::<Path>(list.tokens.clone())?);
                 }
@@ -84,7 +116,7 @@ impl InterfaceArgs {
                     return Err(syn::Error::new(
                         other.span(),
                         "unknown argument. Use `abi = com|cpp|msvc|itanium|c`, `iid = \"...\"`, \
-                         `extends(IBase)`, `root`, or `internal`.",
+                         `extends(IBase)`, `slots = N`, `root`, or `internal`.",
                     ));
                 }
             }
@@ -119,6 +151,7 @@ impl InterfaceArgs {
             iid,
             extends,
             root,
+            slots,
             internal,
         })
     }
@@ -160,10 +193,14 @@ pub(crate) struct Method {
     pub(crate) name: Ident,
     /// The documentation of the declaration.
     pub(crate) docs: Vec<Attribute>,
+    /// Declared Rust call contract, preserved on the implementation trait method.
+    pub(crate) unsafety: Option<Token![unsafe]>,
     /// The arguments after `&self`.
     pub(crate) params: Vec<Param>,
     /// The return type of the declaration.
     pub(crate) output: ReturnType,
+    /// Explicit foreign calling convention, otherwise the interface's default.
+    pub(crate) convention: Option<syn::LitStr>,
     /// How the method gives its answer.
     pub(crate) kind: ReturnKind,
 }
@@ -266,8 +303,13 @@ impl InterfaceModel {
                 method: Some(Method {
                     name: function.sig.ident.clone(),
                     docs: doc_attributes(&function.attrs),
+                    unsafety: match &function.sig.safety {
+                        syn::Safety::Unsafe(token) => Some(*token),
+                        _ => None,
+                    },
                     params,
                     output: function.sig.output.clone(),
+                    convention: options.convention,
                     kind,
                 }),
             });
@@ -301,6 +343,8 @@ struct MethodOptions {
     hidden_return: bool,
     /// Portable aggregate return lowering.
     aggregate: bool,
+    /// Explicit calling convention override.
+    convention: Option<syn::LitStr>,
 }
 
 impl MethodOptions {
@@ -331,6 +375,47 @@ impl MethodOptions {
         }
     }
 
+    /// Read one return-lowering option or calling-convention override.
+    fn parse_abi_option(&mut self, item: Meta) -> Result<(), syn::Error> {
+        match item {
+            Meta::Path(path) if path.is_ident("scalar") => self.scalar = true,
+            Meta::Path(path) if path.is_ident("hidden_return") => self.hidden_return = true,
+            Meta::Path(path) if path.is_ident("aggregate") => self.aggregate = true,
+            Meta::NameValue(pair) if pair.path.is_ident("convention") => {
+                let Expr::Lit(ExprLit {
+                    lit: Lit::Str(text),
+                    ..
+                }) = pair.value
+                else {
+                    return Err(syn::Error::new(
+                        pair.span(),
+                        "convention requires a string literal",
+                    ));
+                };
+                if !CONVENTIONS.contains(&text.value().as_str()) {
+                    return Err(syn::Error::new(
+                        text.span(),
+                        "unsupported convention; use C, system, cdecl, stdcall, fastcall, thiscall, win64, sysv64, or aapcs",
+                    ));
+                }
+                if self.convention.is_some() {
+                    return Err(syn::Error::new(
+                        text.span(),
+                        "convention may be specified only once",
+                    ));
+                }
+                self.convention = Some(text);
+            }
+            other => {
+                return Err(syn::Error::new(
+                    other.span(),
+                    "abi: use scalar, hidden_return, aggregate, or convention = \"...\"",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Read the attributes of a method.
     fn parse(attrs: &[Attribute]) -> Result<Self, syn::Error> {
         let mut options = Self {
@@ -338,6 +423,7 @@ impl MethodOptions {
             scalar: false,
             hidden_return: false,
             aggregate: false,
+            convention: None,
         };
         for attr in attrs {
             if attr.path().is_ident("doc") {
@@ -349,23 +435,10 @@ impl MethodOptions {
                 continue;
             }
             if attr.path().is_ident("abi") {
-                let names =
-                    attr.parse_args_with(Punctuated::<Ident, Token![,]>::parse_terminated)?;
-                for name in &names {
-                    match name.to_string().as_str() {
-                        "scalar" => options.scalar = true,
-                        "hidden_return" => options.hidden_return = true,
-                        "aggregate" => options.aggregate = true,
-                        other => {
-                            return Err(syn::Error::new(
-                                name.span(),
-                                format!(
-                                    "abi: `{other}` is unknown. Use `scalar` or \
-                                     `hidden_return` or `aggregate`."
-                                ),
-                            ));
-                        }
-                    }
+                let items =
+                    attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)?;
+                for item in items {
+                    options.parse_abi_option(item)?;
                 }
                 continue;
             }

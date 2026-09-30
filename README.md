@@ -90,12 +90,59 @@ targets. These options do not provide cross-ABI calls within one process.
 
 `#[interface(abi = c)]` describes a C-compatible function table. The object begins
 with a pointer to that table; each function receives the object pointer first.
-`#[slot(N)]` reserves entries before a method, relative to the derived part of a
-vtable. Reserved slots are not callable on a generated Rust implementation.
+
+Override individual methods with `#[abi(convention = "system")]`, for example
+when a C table combines C and Windows system calls. The override applies to both
+the function-pointer field and the Rust implementation shim. On Windows x86,
+`"C"`, `"stdcall"`, `"fastcall"`, and `"thiscall"` select distinct conventions.
+Use only conventions supported by the Rust target and matching the foreign header.
+The override changes the calling convention, while return lowering still follows
+the interface ABI and the method's `scalar`, `aggregate`, or `hidden_return` option.
+Options can be combined, such as `#[abi(convention = "C", aggregate)]`.
+
+Partial tables can name only the known functions:
+
+```rust
+use cppvtable::interface;
+
+#[interface(abi = c, slots = 50)]
+pub unsafe trait IPartial {
+    /// Read the known value from the 33rd entry.
+    #[slot(32)]
+    #[abi(convention = "system")]
+    fn known(&self) -> u32;
+}
+```
+
+`#[slot(N)]` uses zero-based function-pointer entries, never byte offsets. It
+reserves unknown entries before the named method. Without `slots`, the generated
+table ends immediately after the last declared entry; `slots = 50` also reserves
+unknown trailing entries so the entire table contains 50 entries. Unknown entries
+need no invented signatures or method names.
+
+For `extends(IBase)`, method slot indices start after the complete base vtable,
+while `slots` counts the complete table including that base. The compiler rejects
+an extent smaller than the inherited and declared entries. Reserved entries in a
+generated Rust implementation are null and must not be called. A partial declaration
+can describe a foreign object with additional working methods; the Rust implementation
+only provides its declared methods.
 
 Use fixed-layout FFI types in method signatures, raw pointers for borrowed data,
 and interior mutability when implementations change state. Interface methods use
 `&self` because callbacks can reenter the object.
+
+The declaration's `fn` or `unsafe fn` is preserved in the generated implementation
+trait. Declare a method `unsafe fn` and document its `# Safety` requirements when
+it requires valid pointer arguments or assumes that `self` is embedded in an
+allocated object. A safe implementation method must also be safe when called
+directly from Rust on a standalone implementation value. Merely declaring an
+`unsafe trait` does not make its methods unsafe.
+
+Calls through the generated foreign-interface wrapper always require `unsafe`,
+even when the implementation method is safe. The generated vtable shim recovers
+the embedded implementation value; a direct Rust call to an implementation method
+does not establish that allocation invariant. Helpers such as `interface_of` and
+COM `from_impl` require the caller to establish it explicitly.
 
 - Scalars and pointers use the selected calling convention directly.
 - `#[abi(scalar)]` permits a transparent scalar wrapper.
@@ -121,7 +168,11 @@ use cppvtable_com::{
 #[interface(abi = com, iid = "1c1a0b4f-2a4a-4a1b-9a4a-0f0a0b0c0d01")]
 pub unsafe trait IThing {
     /// Write the value to the caller's storage.
-    fn GetValue(&self, value: *mut u32) -> HRESULT;
+    ///
+    /// # Safety
+    ///
+    /// `value` must point to aligned, writable storage for a `u32`.
+    unsafe fn GetValue(&self, value: *mut u32) -> HRESULT;
 }
 
 #[implement(IThing)]
@@ -135,7 +186,7 @@ unsafe impl RefCounted for Thing {
 }
 
 impl IThingImpl for Thing {
-    fn GetValue(&self, value: *mut u32) -> HRESULT {
+    unsafe fn GetValue(&self, value: *mut u32) -> HRESULT {
         // SAFETY: The interface contract requires writable output storage.
         unsafe { *value = self.value };
         S_OK
@@ -221,6 +272,9 @@ lifetime transitions. Compiler jobs are defined in `.github/workflows`.
 - COM `RefCounted` implementations now require `unsafe impl` and adherence to the
   documented hook contracts. Lifecycle, container, and query hooks use `unsafe fn`
   because the runtime supplies a live embedded object to them.
+- Interface methods with pointer-validity or object-allocation preconditions must
+  be declared and implemented as `unsafe fn`. The macro preserves that qualifier;
+  direct Rust calls must uphold the documented preconditions.
 
 ## License
 

@@ -1,8 +1,8 @@
 //! The code generator of the shared `#[interface]` macro.
 //!
 //! The ABI entry point emits only the interface wrapper, vtable, and metadata needed to
-//! call a foreign object. The COM entry point also emits implementation shims, an
-//! implementer trait, and a vtable builder for `cppvtable-com`'s object model.
+//! call a foreign object. The C/C++ and COM runtime entry points also emit implementation
+//! shims, an implementer trait, and a vtable builder for their respective object models.
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -49,7 +49,7 @@ pub(crate) fn expand_abi(args: TokenStream, item: &ItemTrait) -> Result<TokenStr
     expand_abi_with_runtime(args, item, Runtime::Abi)
 }
 
-/// Expand the ABI macro re-exported by the ordinary C/C++ crate.
+/// Expand the interface macro re-exported by the ordinary C/C++ runtime crate.
 pub(crate) fn expand_native(
     args: TokenStream,
     item: &ItemTrait,
@@ -99,6 +99,9 @@ fn generate(
     let vtbl_name = derived_name(name, "Vtbl");
     let impl_name = derived_name(name, "Impl");
     let base = base_of(args);
+    let trailing_slots = args.slots.map(|total| {
+        crate::layout::trailing_slots(total, model.slots.len(), base.vtbl_type(&krate))
+    });
     let is_plain = matches!(runtime, Runtime::Native);
     let object = if is_plain {
         quote! { #krate::Object }
@@ -124,7 +127,14 @@ fn generate(
         _ => TokenStream::new(),
     };
     for variant in args.abi.variants() {
-        output.extend(vtable_struct(model, &variant, &base, &krate, &vtbl_name));
+        output.extend(vtable_struct(
+            model,
+            &variant,
+            &base,
+            &krate,
+            &vtbl_name,
+            trailing_slots.as_ref(),
+        ));
         if generate_shims {
             output.extend(shims(model, &variant, &object, &impl_name));
         }
@@ -142,7 +152,13 @@ fn generate(
     if generate_shims {
         output.extend(impl_trait(model, &base, &implementation, &impl_name));
         output.extend(vtable_builder(
-            model, &base, &krate, &vtbl_name, &impl_name, vis,
+            model,
+            &base,
+            &krate,
+            &vtbl_name,
+            &impl_name,
+            vis,
+            trailing_slots.as_ref(),
         ));
     }
     output
@@ -202,11 +218,18 @@ fn vtable_struct(
     base: &Base,
     krate: &TokenStream,
     vtbl_name: &Ident,
+    trailing_slots: Option<&TokenStream>,
 ) -> TokenStream {
     let vis = &model.vis;
     let name = &model.name;
     let cfg = &variant.cfg;
     let convention = variant.convention;
+    let trailing_field = trailing_slots.map(|count| {
+        quote! {
+            /// Unknown trailing entries included in the declared total vtable size.
+            pub __reserved_tail: [::core::option::Option<unsafe extern #convention fn()>; #count],
+        }
+    });
     let doc = format!("The vtable of [`{name}`]. The layout is the layout of the C++ vtable.");
     let base_field = base.vtbl_type(krate).map(|ty| {
         quote! {
@@ -250,6 +273,7 @@ fn vtable_struct(
         #vis struct #vtbl_name {
             #base_field
             #(#fields)*
+            #trailing_field
         }
     }
 }
@@ -272,11 +296,19 @@ fn hidden_parameters(variant: &AbiVariant, ret: &TokenStream) -> TokenStream {
     }
 }
 
+/// Use the method override consistently for its vtable field and shim.
+fn method_convention(method: &Method, variant: &AbiVariant) -> syn::LitStr {
+    method
+        .convention
+        .clone()
+        .unwrap_or_else(|| syn::LitStr::new(variant.convention, proc_macro2::Span::call_site()))
+}
+
 /// Give the type of the function pointer of a method.
 fn pointer_type(method: &Method, variant: &AbiVariant) -> TokenStream {
     let names = method.params.iter().map(|param| &param.name);
     let types = method.params.iter().map(|param| &param.ty);
-    let convention = variant.convention;
+    let convention = method_convention(method, variant);
     match effective_kind(method.kind, variant) {
         ReturnKind::Hidden => {
             let ret = return_type(method);
@@ -316,10 +348,10 @@ fn shims(
     impl_name: &Ident,
 ) -> TokenStream {
     let cfg = &variant.cfg;
-    let convention = variant.convention;
     let name = &model.name;
     let items = model.slots.iter().filter_map(|slot| {
         let method = slot.method.as_ref()?;
+        let convention = method_convention(method, variant);
         let shim = shim_name(name, slot.index);
         let method_name = &method.name;
         let names: Vec<&Ident> = method.params.iter().map(|param| &param.name).collect();
@@ -605,9 +637,17 @@ fn impl_trait(
     let doc = format!(
         "The implementer side of [`{name}`].\n\n\
          Implement this trait for the type that `#[implement({name})]` marks. Each \
-         method takes `&self`, because a foreign caller can call the object again \
-         during a call and from another thread. Use interior mutability for state that \
-         changes."
+         method takes `&self` to permit reentrant foreign calls. Use interior mutability \
+         for state that changes. Thread access must obey the interface and owning \
+         object's contract; `&self` does not authorize arbitrary concurrent calls.\n\n\
+         These methods can also be called directly on a standalone Rust value. A safe \
+         method must accept every argument permitted by its Rust signature and cannot \
+         assume that `self` is embedded in an object allocation. Declare a method \
+         `unsafe fn` and document its preconditions when it requires valid foreign \
+         pointers or an embedded `self`. The declaration's method safety is preserved \
+         exactly; pointer types do not imply unsafety automatically. Generated vtable \
+         shims recover `self` from a live object allocation before invoking a method; \
+         foreign callers must uphold the declared method preconditions."
     );
     let methods = model.slots.iter().filter_map(|slot| {
         let method = slot.method.as_ref()?;
@@ -616,11 +656,12 @@ fn impl_trait(
         let names = method.params.iter().map(|param| &param.name);
         let types = method.params.iter().map(|param| &param.ty);
         let output = &method.output;
+        let unsafety = &method.unsafety;
         let expect = many_arguments_expect(method.params.len() + 1);
         Some(quote! {
             #(#docs)*
             #expect
-            fn #method_name(&self #(, #names: #types)*) #output;
+            #unsafety fn #method_name(&self #(, #names: #types)*) #output;
         })
     });
     let expect = non_snake_case_expect(
@@ -645,8 +686,14 @@ fn vtable_builder(
     vtbl_name: &Ident,
     impl_name: &Ident,
     vis: &Visibility,
+    trailing_slots: Option<&TokenStream>,
 ) -> TokenStream {
     let name = &model.name;
+    let trailing_value = trailing_slots.map(|count| {
+        quote! {
+            __reserved_tail: [::core::option::Option::None; #count],
+        }
+    });
     let base_value = match base {
         Base::None => TokenStream::new(),
         Base::Unknown => quote! { base: #krate::IUnknownVtbl::new::<T, SLOT>(), },
@@ -680,6 +727,7 @@ fn vtable_builder(
                 Self {
                     #base_value
                     #(#values)*
+                    #trailing_value
                 }
             }
         }

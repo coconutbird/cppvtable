@@ -20,6 +20,8 @@ mod c_table;
     expect(dead_code, reason = "compiler fixtures are used in tests")
 )]
 mod com;
+#[cfg(test)]
+mod conventions;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "compiler fixtures are used in tests")
@@ -144,7 +146,9 @@ fn create_cpp_cat(lives: i32) -> *mut c_void {
     not(test),
     expect(dead_code, reason = "compiled for cpp_build and used in tests")
 )]
-fn cpp_call_legs(animal: *mut c_void) -> i32 {
+/// # Safety
+/// The object pointer must identify the matching live C++ interface or concrete object.
+unsafe fn cpp_call_legs(animal: *mut c_void) -> i32 {
     cpp!(unsafe [animal as "ICppAnimal*"] -> i32 as "int" {
         return animal->legs();
     })
@@ -154,7 +158,9 @@ fn cpp_call_legs(animal: *mut c_void) -> i32 {
     not(test),
     expect(dead_code, reason = "compiled for cpp_build and used in tests")
 )]
-fn delete_cpp_dog(animal: *mut c_void) {
+/// # Safety
+/// The pointer must identify the matching live C++ concrete allocation, owned by the caller.
+unsafe fn delete_cpp_dog(animal: *mut c_void) {
     cpp!(unsafe [animal as "ICppAnimal*"] {
         delete static_cast<CppDog*>(animal);
     });
@@ -164,7 +170,9 @@ fn delete_cpp_dog(animal: *mut c_void) {
     not(test),
     expect(dead_code, reason = "compiled for cpp_build and used in tests")
 )]
-fn cpp_call_rust_legs(rust_animal: *mut c_void) -> i32 {
+/// # Safety
+/// The object pointer must identify the matching live C++ interface or concrete object.
+unsafe fn cpp_call_rust_legs(rust_animal: *mut c_void) -> i32 {
     cpp!(unsafe [rust_animal as "ICppAnimal*"] -> i32 as "int" {
         return rust_animal->legs();
     })
@@ -185,7 +193,9 @@ fn create_cpp_duck(speed: i32) -> *mut c_void {
     not(test),
     expect(dead_code, reason = "compiled for cpp_build and used in tests")
 )]
-fn delete_cpp_duck(duck: *mut c_void) {
+/// # Safety
+/// The pointer must identify the matching live C++ concrete allocation, owned by the caller.
+unsafe fn delete_cpp_duck(duck: *mut c_void) {
     cpp!(unsafe [duck as "CppDuck*"] {
         delete duck;
     });
@@ -195,7 +205,9 @@ fn delete_cpp_duck(duck: *mut c_void) {
     not(test),
     expect(dead_code, reason = "compiled for cpp_build and used in tests")
 )]
-fn cpp_duck_as_swimmer(duck: *mut c_void) -> *mut c_void {
+/// # Safety
+/// The object pointer must identify the matching live C++ interface or concrete object.
+unsafe fn cpp_duck_as_swimmer(duck: *mut c_void) -> *mut c_void {
     cpp!(unsafe [duck as "CppDuck*"] -> *mut c_void as "void*" {
         return static_cast<ISwimmer*>(duck);
     })
@@ -205,7 +217,9 @@ fn cpp_duck_as_swimmer(duck: *mut c_void) -> *mut c_void {
     not(test),
     expect(dead_code, reason = "compiled for cpp_build and used in tests")
 )]
-fn cpp_duck_as_flyer(duck: *mut c_void) -> *mut c_void {
+/// # Safety
+/// The object pointer must identify the matching live C++ interface or concrete object.
+unsafe fn cpp_duck_as_flyer(duck: *mut c_void) -> *mut c_void {
     cpp!(unsafe [duck as "CppDuck*"] -> *mut c_void as "void*" {
         return static_cast<IFlyer*>(duck);
     })
@@ -215,7 +229,9 @@ fn cpp_duck_as_flyer(duck: *mut c_void) -> *mut c_void {
     not(test),
     expect(dead_code, reason = "compiled for cpp_build and used in tests")
 )]
-fn cpp_call_swim_speed(swimmer: *mut c_void) -> i32 {
+/// # Safety
+/// The object pointer must identify the matching live C++ interface or concrete object.
+unsafe fn cpp_call_swim_speed(swimmer: *mut c_void) -> i32 {
     cpp!(unsafe [swimmer as "ISwimmer*"] -> i32 as "int" {
         return swimmer->swim_speed();
     })
@@ -225,7 +241,9 @@ fn cpp_call_swim_speed(swimmer: *mut c_void) -> i32 {
     not(test),
     expect(dead_code, reason = "compiled for cpp_build and used in tests")
 )]
-fn cpp_call_fly_speed(flyer: *mut c_void) -> i32 {
+/// # Safety
+/// The object pointer must identify the matching live C++ interface or concrete object.
+unsafe fn cpp_call_fly_speed(flyer: *mut c_void) -> i32 {
     cpp!(unsafe [flyer as "IFlyer*"] -> i32 as "int" {
         return flyer->fly_speed();
     })
@@ -376,7 +394,9 @@ impl Cat {
     not(test),
     expect(dead_code, reason = "compiled for cpp_build and used in tests")
 )]
-fn delete_cpp_cat(animal: *mut c_void) {
+/// # Safety
+/// The pointer must identify the matching live C++ concrete allocation, owned by the caller.
+unsafe fn delete_cpp_cat(animal: *mut c_void) {
     cpp!(unsafe [animal as "ICppAnimal*"] {
         delete static_cast<CppCat*>(animal);
     });

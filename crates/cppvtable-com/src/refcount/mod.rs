@@ -41,13 +41,12 @@
 //! 9. **A child with [`ForwardRefCount`] dies with its container.** The container owns
 //!    an [`crate::OwnedObject`] of the child. The child is destroyed when the `Drop` of
 //!    the container type drops that handle.
-//! 10. **The counts are atomic and the order is strong.** Each read-modify-write of a
-//!     count uses `AcqRel` and each load uses `Acquire`. A thread that makes the last
-//!     transition therefore sees all writes of every other thread before the destructor
-//!     runs. The strong order also stops the optimizer from moving a load out of the
-//!     spin loop of the transition lock. A `Relaxed` load in such a loop is not safe
-//!     against that. The behaviour is therefore the same with and without
-//!     optimization.
+//! 10. **Count operations synchronize lifetime transitions.** Each read-modify-write
+//!     uses `AcqRel` and each load uses `Acquire`. The final reference release observes
+//!     writes published through earlier releases before destruction. An acquire load
+//!     that observes the transition lock being released also observes the completed
+//!     hook's writes. These orders provide visibility between threads; atomic loads
+//!     with `Relaxed` ordering do not provide that synchronization by themselves.
 //!
 //! # A Direct3D 9 example
 //!

@@ -132,6 +132,8 @@ cpp! {{
     };
 }}
 
+/// # Safety
+/// The pointer must borrow a live primary COM fixture interface with one owned reference.
 unsafe fn cpp_exercise_rust_com(pointer: *mut c_void) -> bool {
     cpp!(unsafe [pointer as "CppvtableComFixtureFirst*"] -> bool as "bool" {
         bool valid = pointer->FirstValue() == 41;
@@ -166,18 +168,24 @@ unsafe fn cpp_exercise_rust_com(pointer: *mut c_void) -> bool {
     })
 }
 
+/// # Safety
+/// The aligned writable drop counter must outlive every reference to the returned object.
 unsafe fn cpp_create_native_com(drops: *mut u32) -> *mut c_void {
     cpp!(unsafe [drops as "std::uint32_t*"] -> *mut c_void as "void*" {
         return static_cast<CppvtableComFixtureFirst*>(new CppvtableComFixtureNative(drops));
     })
 }
 
+/// # Safety
+/// The pointer must borrow a live primary interface allocated by the native fixture factory.
 unsafe fn cpp_native_public_count(pointer: *mut c_void) -> u32 {
     cpp!(unsafe [pointer as "CppvtableComFixtureFirst*"] -> u32 as "std::uint32_t" {
         return static_cast<CppvtableComFixtureNative*>(pointer)->refs;
     })
 }
 
+/// # Safety
+/// The pointer must own a live COM reference consumed by this call.
 unsafe fn cpp_release_com(pointer: *mut c_void) -> u32 {
     cpp!(unsafe [pointer as "CppvtableComFixtureUnknown*"] -> u32 as "std::uint32_t" {
         return pointer->Release();

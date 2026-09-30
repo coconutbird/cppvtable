@@ -114,7 +114,7 @@ fn a_c_caller_finds_each_method_at_its_own_slot_number() {
 }
 
 #[test]
-fn the_safe_wrapper_reaches_the_same_methods() {
+fn the_interface_wrapper_reaches_the_same_methods() {
     let object: ComPtr<ISparseChild> = ComObject::new(Sparse);
     // SAFETY: The object is alive.
     unsafe {

@@ -76,13 +76,19 @@ fn create_derived(value: i32) -> *mut c_void {
         return new CppDerived(value);
     })
 }
-fn delete_derived(object: *mut c_void) {
+/// # Safety
+/// The pointer must identify the matching live C++ concrete allocation, owned by the caller.
+unsafe fn delete_derived(object: *mut c_void) {
     cpp!(unsafe [object as "CppDerived*"] { delete object; });
 }
-fn cpp_value(object: *mut c_void) -> i32 {
+/// # Safety
+/// The object pointer must identify the matching live C++ interface or concrete object.
+unsafe fn cpp_value(object: *mut c_void) -> i32 {
     cpp!(unsafe [object as "IBase*"] -> i32 as "int" { return object->value(); })
 }
-fn cpp_scaled(object: *mut c_void, factor: i32) -> i32 {
+/// # Safety
+/// The object pointer must identify the matching live C++ interface or concrete object.
+unsafe fn cpp_scaled(object: *mut c_void, factor: i32) -> i32 {
     cpp!(unsafe [object as "IDerived*", factor as "int"] -> i32 as "int" {
         return object->scaled(factor);
     })
@@ -100,16 +106,20 @@ fn rust_calls_cpp_inherited_and_explicit_interfaces() {
         assert_eq!(explicit.value(), 11);
         assert_eq!(explicit.scaled(3), 33);
     }
-    delete_derived(raw);
+    // SAFETY: The pointer is the unique concrete allocation from the factory.
+    unsafe { delete_derived(raw) };
 }
 
 #[test]
 fn cpp_calls_rust_inherited_and_explicit_interfaces() {
     let owner = OwnedObject::new(Derived { value: 11 });
-    assert_eq!(cpp_value(owner.as_raw::<IDerived>()), 11);
-    assert_eq!(cpp_scaled(owner.as_raw::<IDerived>(), 3), 33);
-    assert_eq!(cpp_value(owner.as_raw::<IExplicit>()), 11);
-    assert_eq!(cpp_scaled(owner.as_raw::<IExplicit>(), 3), 33);
+    // SAFETY: The owner keeps both matching interfaces alive through native calls.
+    unsafe {
+        assert_eq!(cpp_value(owner.as_raw::<IDerived>()), 11);
+        assert_eq!(cpp_scaled(owner.as_raw::<IDerived>(), 3), 33);
+        assert_eq!(cpp_value(owner.as_raw::<IExplicit>()), 11);
+        assert_eq!(cpp_scaled(owner.as_raw::<IExplicit>(), 3), 33);
+    }
     let base = owner.query_interface::<IBase>().expect("inherited base");
     assert_eq!(base.as_raw(), owner.as_raw::<IDerived>());
     // SAFETY: The owner's interface remains alive.

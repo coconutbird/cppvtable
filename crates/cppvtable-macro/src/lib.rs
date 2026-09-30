@@ -6,6 +6,7 @@
 mod abi;
 mod implement;
 mod interface;
+mod layout;
 mod parse;
 mod validate;
 
@@ -17,10 +18,14 @@ use proc_macro::TokenStream;
 /// #[interface(abi = com, iid = "d0223b96-bf7a-43fd-92bd-a43b0d82b9eb",
 ///             extends(IDirect3DResource9))]
 /// pub unsafe trait IDirect3DVertexBuffer9 {
-///     fn Lock(&self, offset: u32, size: u32, data: *mut *mut c_void, flags: u32) -> HRESULT;
+///     /// # Safety
+///     /// `data` must be writable; offset, size, and flags must obey the resource contract.
+///     unsafe fn Lock(&self, offset: u32, size: u32, data: *mut *mut c_void, flags: u32) -> HRESULT;
 ///     fn Unlock(&self) -> HRESULT;
+///     /// # Safety
+///     /// `desc` must point to writable storage for a descriptor.
 ///     #[slot(6)]
-///     fn GetDesc(&self, desc: *mut D3DVERTEXBUFFER_DESC) -> HRESULT;
+///     unsafe fn GetDesc(&self, desc: *mut D3DVERTEXBUFFER_DESC) -> HRESULT;
 /// }
 /// ```
 ///
@@ -33,6 +38,9 @@ use proc_macro::TokenStream;
 /// - `iid = "..."`: required COM interface identifier; unavailable for ordinary objects.
 /// - `extends(IBase)`: the base interface. A COM interface without `extends` comes
 ///   directly from `IUnknown`.
+/// - `slots = N`: total function-pointer entries, including the base vtable. Unknown
+///   trailing entries are reserved to reach this extent. Without it, the vtable ends
+///   after its last declared entry. An insufficient extent is a compile error.
 /// - `root`: the interface has no base. For COM, the runtime supplies the root vtable
 ///   builder; ordinary objects generate their own implementation shims.
 /// - `internal`: the paths of the generated code start with `crate`. Only the
@@ -48,6 +56,19 @@ use proc_macro::TokenStream;
 /// - `#[abi(scalar)]`: a transparent scalar wrapper returned using native scalar lowering.
 /// - `#[abi(aggregate)]`: a trivially copyable `#[repr(C)]` structure returned according
 ///   to the selected C/C++ ABI. Nontrivial C++ classes require an explicit C shim.
+/// - `#[abi(convention = "stdcall")]`: override this method's calling convention.
+///   Accepted names are `C`, `system`, `cdecl`, `stdcall`, `fastcall`, `thiscall`,
+///   `win64`, `sysv64`, and `aapcs`; the Rust target must support the selected convention.
+///   This can be combined with a return-lowering option in the same attribute.
+///
+/// # Method safety
+///
+/// Generated implementation traits preserve each declaration's `fn` or `unsafe fn`.
+/// Their methods may be called directly on standalone Rust values. A safe method must
+/// support such calls and all arguments allowed by its signature. If a method requires
+/// valid foreign pointers or an allocation-embedded `self`, declare it `unsafe fn` and
+/// document those preconditions. Pointer parameters alone do not imply unsafety.
+/// Foreign callers must uphold the method contract; every caller wrapper is unsafe.
 ///
 /// # Generated items
 ///

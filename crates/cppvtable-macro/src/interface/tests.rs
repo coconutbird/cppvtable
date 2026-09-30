@@ -217,3 +217,216 @@ fn aggregate_return_attributes_cannot_conflict() {
             .contains("aggregate cannot be combined")
     );
 }
+
+fn assert_declared_method_safety(output: TokenStream) {
+    let file: syn::File = syn::parse2(output).unwrap();
+    let implementation = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Trait(item) if item.ident == "IContractImpl" => Some(item),
+            _ => None,
+        })
+        .unwrap();
+    let expected = [
+        ("scalar", false),
+        ("passthrough", false),
+        ("read", true),
+        ("write", true),
+        ("protocol_state", true),
+        ("aggregate", true),
+        ("indirect", true),
+    ];
+    for (name, is_unsafe) in expected {
+        let method = implementation
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::TraitItem::Fn(item) if item.sig.ident == name => Some(item),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            matches!(method.sig.safety, syn::Safety::Unsafe(_)),
+            is_unsafe,
+            "method {name}"
+        );
+        let mut callers = 0;
+        for item in &file.items {
+            let syn::Item::Impl(item) = item else {
+                continue;
+            };
+            let syn::Type::Path(ty) = item.self_ty.as_ref() else {
+                continue;
+            };
+            if !ty.path.is_ident("IContract") {
+                continue;
+            }
+            for item in &item.items {
+                if let syn::ImplItem::Fn(item) = item {
+                    if item.sig.ident == name {
+                        callers += 1;
+                        assert!(
+                            matches!(item.sig.safety, syn::Safety::Unsafe(_)),
+                            "caller {name} must remain unsafe"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(callers > 0, "missing caller {name}");
+    }
+}
+
+fn mixed_safety_contract() -> syn::ItemTrait {
+    syn::parse_quote! {
+        unsafe trait IContract {
+            fn scalar(&self) -> u32;
+            fn passthrough(&self, pointer: *mut u32) -> *mut u32;
+            unsafe fn read(&self, input: *const u32) -> u32;
+            unsafe fn write(&self, output: *mut u32);
+            unsafe fn protocol_state(&self) -> u32;
+            #[abi(aggregate)]
+            unsafe fn aggregate(&self) -> Aggregate;
+            #[abi(hidden_return)]
+            unsafe fn indirect(&self) -> Aggregate;
+        }
+    }
+}
+
+#[test]
+fn native_implementation_traits_preserve_declared_method_safety() {
+    let item = mixed_safety_contract();
+    for args in [
+        quote! { abi = c },
+        quote! { abi = cpp },
+        quote! { abi = msvc },
+        quote! { abi = itanium },
+    ] {
+        assert_declared_method_safety(super::expand_native(args, &item).unwrap());
+    }
+}
+
+#[test]
+fn com_implementation_traits_preserve_declared_method_safety() {
+    assert_declared_method_safety(
+        super::expand(
+            quote! { abi = com, iid = "00000000-0000-0000-C000-000000000046" },
+            &mixed_safety_contract(),
+        )
+        .unwrap(),
+    );
+}
+
+#[test]
+fn method_convention_override_matches_the_vtable_field_and_shim() {
+    for convention in [
+        "C", "system", "cdecl", "stdcall", "fastcall", "thiscall", "win64", "sysv64", "aapcs",
+    ] {
+        let declaration: syn::ItemTrait = syn::parse2(quote! {
+            unsafe trait IMixed {
+                fn default_method(&self) -> u32;
+                #[abi(convention = #convention)]
+                fn explicit_method(&self) -> u32;
+                #[abi(aggregate, convention = #convention)]
+                unsafe fn explicit_aggregate(&self) -> Aggregate;
+            }
+        })
+        .unwrap();
+        let file: syn::File =
+            syn::parse2(super::expand_native(quote! { abi = c }, &declaration).unwrap()).unwrap();
+        for (method, shim) in [
+            ("explicit_method", "__cppvtable_imixed_slot_1"),
+            ("explicit_aggregate", "__cppvtable_imixed_slot_2"),
+        ] {
+            let table = file
+                .items
+                .iter()
+                .find_map(|item| match item {
+                    syn::Item::Struct(item) if item.ident == "IMixedVtbl" => Some(item),
+                    _ => None,
+                })
+                .unwrap();
+            let field = table
+                .fields
+                .iter()
+                .find(|field| field.ident.as_ref().is_some_and(|name| name == method))
+                .unwrap();
+            let syn::Type::FnPtr(pointer) = &field.ty else {
+                panic!("method field must be a function pointer");
+            };
+            assert_eq!(
+                pointer.abi.as_ref().unwrap().name.as_ref().unwrap().value(),
+                convention
+            );
+            let shim = file
+                .items
+                .iter()
+                .find_map(|item| match item {
+                    syn::Item::Fn(item) if item.sig.ident == shim => Some(item),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(
+                shim.sig
+                    .abi
+                    .as_ref()
+                    .unwrap()
+                    .name
+                    .as_ref()
+                    .unwrap()
+                    .value(),
+                convention
+            );
+        }
+    }
+}
+
+#[test]
+fn method_convention_override_rejects_unsupported_values_and_duplicates() {
+    for convention in [
+        "Rust",
+        "C-unwind",
+        "rust-intrinsic",
+        "vectorcall",
+        "unknown",
+    ] {
+        let declaration: syn::ItemTrait = syn::parse2(quote! {
+            unsafe trait IMixed {
+                #[abi(convention = #convention)]
+                fn explicit_method(&self) -> u32;
+            }
+        })
+        .unwrap();
+        assert!(
+            super::expand_native(quote! { abi = c }, &declaration)
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported convention")
+        );
+    }
+    let non_string: syn::ItemTrait = syn::parse_quote! {
+        unsafe trait IMixed {
+            #[abi(convention = 7)]
+            fn explicit_method(&self) -> u32;
+        }
+    };
+    assert!(
+        super::expand_native(quote! { abi = c }, &non_string)
+            .unwrap_err()
+            .to_string()
+            .contains("string literal")
+    );
+    let duplicate: syn::ItemTrait = syn::parse_quote! {
+        unsafe trait IMixed {
+            #[abi(convention = "C", convention = "system")]
+            fn explicit_method(&self) -> u32;
+        }
+    };
+    assert!(
+        super::expand_native(quote! { abi = c }, &duplicate)
+            .unwrap_err()
+            .to_string()
+            .contains("only once")
+    );
+}

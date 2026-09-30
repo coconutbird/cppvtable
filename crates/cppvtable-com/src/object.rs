@@ -171,9 +171,9 @@ impl<T: ComImplement> ComObject<T> {
     ///
     /// # Safety
     ///
-    /// `data` must be the field `data` of a live `ComObject<T>`. Every value of an
-    /// implementation type is inside a `ComObject`, but a caller can make a value on
-    /// the stack. Do not call this function with such a value.
+    /// `data` must be the field `data` of a live `ComObject<T>`. The generated vtable
+    /// shims supply embedded values. Direct Rust calls can also use standalone values,
+    /// which must not be passed to this function.
     #[inline]
     #[must_use]
     pub unsafe fn of_data(data: &T) -> *const Self {
@@ -353,8 +353,10 @@ unsafe impl<T> Sync for OwnedObject<T> where
 ///
 /// # Safety
 ///
-/// `data` must be the value inside a live [`ComObject<T>`]. The `&self` of a method of
-/// an interface always obeys this rule. A value on the stack does not.
+/// `data` must be the value inside a live [`ComObject<T>`]. A generated vtable shim
+/// supplies such a value, but a direct implementation-method call may use a standalone
+/// Rust value. A method calling this function must require the embedded allocation in
+/// its unsafe contract.
 #[inline]
 #[must_use]
 pub unsafe fn interface_of<T, I>(data: &T) -> *mut c_void

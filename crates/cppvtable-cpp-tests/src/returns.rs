@@ -32,6 +32,20 @@ unsafe trait IReturns {
     fn wide(&self, value: i64) -> i64;
     #[abi(hidden_return)]
     fn indirect(&self, value: i64) -> Large;
+    /// Return a small aggregate using a value read from caller storage.
+    ///
+    /// # Safety
+    ///
+    /// `value` must point to an initialized, aligned `i32` readable for this call.
+    #[abi(aggregate)]
+    unsafe fn small_from(&self, value: *const i32) -> Small;
+    /// Return an indirect aggregate using a value read from caller storage.
+    ///
+    /// # Safety
+    ///
+    /// `value` must point to an initialized, aligned `i64` readable for this call.
+    #[abi(hidden_return)]
+    unsafe fn indirect_from(&self, value: *const i64) -> Large;
 }
 
 #[implement(IReturns)]
@@ -65,6 +79,14 @@ impl IReturnsImpl for Returns {
     fn indirect(&self, value: i64) -> Large {
         self.large(value)
     }
+    unsafe fn small_from(&self, value: *const i32) -> Small {
+        // SAFETY: The implementation contract requires initialized readable storage.
+        self.small(unsafe { *value })
+    }
+    unsafe fn indirect_from(&self, value: *const i64) -> Large {
+        // SAFETY: The implementation contract requires initialized readable storage.
+        self.large(unsafe { *value })
+    }
 }
 
 cpp! {{
@@ -79,6 +101,8 @@ cpp! {{
         virtual void* pointer(void* value) = 0;
         virtual std::int64_t wide(std::int64_t value) = 0;
         virtual Large indirect(std::int64_t value) = 0;
+        virtual Small small_from(const std::int32_t* value) = 0;
+        virtual Large indirect_from(const std::int64_t* value) = 0;
     };
     class CppReturns final : public IReturns {
         std::int64_t bias;
@@ -90,6 +114,8 @@ cpp! {{
         void* pointer(void* value) override { return value; }
         std::int64_t wide(std::int64_t value) override { return value + bias; }
         Large indirect(std::int64_t value) override { return large(value); }
+        Small small_from(const std::int32_t* value) override { return small(*value); }
+        Large indirect_from(const std::int64_t* value) override { return large(*value); }
     };
 }}
 
@@ -99,43 +125,73 @@ fn create_cpp_returns(bias: i64) -> *mut c_void {
     })
 }
 
-fn delete_cpp_returns(object: *mut c_void) {
+/// # Safety
+/// The pointer must identify the matching live C++ concrete allocation, owned by the caller.
+unsafe fn delete_cpp_returns(object: *mut c_void) {
     cpp!(unsafe [object as "CppReturns*"] { delete object; });
 }
 
-fn cpp_small(object: *mut c_void, value: i32) -> Small {
+/// # Safety
+/// The object pointer must identify the matching live C++ interface or concrete object.
+unsafe fn cpp_small(object: *mut c_void, value: i32) -> Small {
     cpp!(unsafe [object as "IReturns*", value as "std::int32_t"] -> Small as "Small" {
         return object->small(value);
     })
 }
 
-fn cpp_large(object: *mut c_void, value: i64) -> Large {
+/// # Safety
+/// The object pointer must identify the matching live C++ interface or concrete object.
+unsafe fn cpp_large(object: *mut c_void, value: i64) -> Large {
     cpp!(unsafe [object as "IReturns*", value as "std::int64_t"] -> Large as "Large" {
         return object->large(value);
     })
 }
 
-fn cpp_floating(object: *mut c_void, value: f64) -> f64 {
+/// # Safety
+/// The object pointer must identify the matching live C++ interface or concrete object.
+unsafe fn cpp_floating(object: *mut c_void, value: f64) -> f64 {
     cpp!(unsafe [object as "IReturns*", value as "double"] -> f64 as "double" {
         return object->floating(value);
     })
 }
 
-fn cpp_pointer(object: *mut c_void, value: *mut c_void) -> *mut c_void {
+/// # Safety
+/// The object pointer must identify the matching live C++ interface or concrete object.
+unsafe fn cpp_pointer(object: *mut c_void, value: *mut c_void) -> *mut c_void {
     cpp!(unsafe [object as "IReturns*", value as "void*"] -> *mut c_void as "void*" {
         return object->pointer(value);
     })
 }
 
-fn cpp_wide(object: *mut c_void, value: i64) -> i64 {
+/// # Safety
+/// The object pointer must identify the matching live C++ interface or concrete object.
+unsafe fn cpp_wide(object: *mut c_void, value: i64) -> i64 {
     cpp!(unsafe [object as "IReturns*", value as "std::int64_t"] -> i64 as "std::int64_t" {
         return object->wide(value);
     })
 }
 
-fn cpp_indirect(object: *mut c_void, value: i64) -> Large {
+/// # Safety
+/// The object pointer must identify the matching live C++ interface or concrete object.
+unsafe fn cpp_indirect(object: *mut c_void, value: i64) -> Large {
     cpp!(unsafe [object as "IReturns*", value as "std::int64_t"] -> Large as "Large" {
         return object->indirect(value);
+    })
+}
+
+/// # Safety
+/// `object` must be a live `IReturns` and `value` must point to a readable `i32`.
+unsafe fn cpp_small_from(object: *mut c_void, value: *const i32) -> Small {
+    cpp!(unsafe [object as "IReturns*", value as "const std::int32_t*"] -> Small as "Small" {
+        return object->small_from(value);
+    })
+}
+
+/// # Safety
+/// `object` must be a live `IReturns` and `value` must point to a readable `i64`.
+unsafe fn cpp_indirect_from(object: *mut c_void, value: *const i64) -> Large {
+    cpp!(unsafe [object as "IReturns*", value as "const std::int64_t*"] -> Large as "Large" {
+        return object->indirect_from(value);
     })
 }
 
@@ -151,18 +207,54 @@ fn rust_calls_cpp_return_abis() {
         assert_eq!(interface.pointer(raw), raw);
         assert_eq!(interface.wide(0x1_0000_0000), 0x1_0000_0028);
         assert_eq!(interface.indirect(2), Large { x: 2, y: 40, z: 42 });
+        let small_input = 9;
+        let large_input = 2;
+        assert_eq!(
+            interface.small_from(&raw const small_input),
+            Small { x: 9, y: 16 }
+        );
+        assert_eq!(
+            interface.indirect_from(&raw const large_input),
+            Large { x: 2, y: 40, z: 42 }
+        );
     }
-    delete_cpp_returns(raw);
+    // SAFETY: The pointer is the unique concrete allocation from the factory.
+    unsafe { delete_cpp_returns(raw) };
 }
 
 #[test]
 fn cpp_calls_rust_return_abis() {
     let owner = OwnedObject::new(Returns { bias: 40 });
     let raw = owner.as_raw::<IReturns>();
-    assert_eq!(cpp_small(raw, 9), Small { x: 9, y: 16 });
-    assert_eq!(cpp_large(raw, 2), Large { x: 2, y: 40, z: 42 });
-    assert_eq!(cpp_floating(raw, 3.25).to_bits(), 3.75_f64.to_bits());
-    assert_eq!(cpp_pointer(raw, raw), raw);
-    assert_eq!(cpp_wide(raw, 0x1_0000_0000), 0x1_0000_0028);
-    assert_eq!(cpp_indirect(raw, 2), Large { x: 2, y: 40, z: 42 });
+    let small_input = 9;
+    let large_input = 2;
+    // SAFETY: The owner keeps the interface alive; local inputs remain readable.
+    unsafe {
+        assert_eq!(cpp_small(raw, 9), Small { x: 9, y: 16 });
+        assert_eq!(cpp_large(raw, 2), Large { x: 2, y: 40, z: 42 });
+        assert_eq!(cpp_floating(raw, 3.25).to_bits(), 3.75_f64.to_bits());
+        assert_eq!(cpp_pointer(raw, raw), raw);
+        assert_eq!(cpp_wide(raw, 0x1_0000_0000), 0x1_0000_0028);
+        assert_eq!(cpp_indirect(raw, 2), Large { x: 2, y: 40, z: 42 });
+        assert_eq!(
+            cpp_small_from(raw, &raw const small_input),
+            Small { x: 9, y: 16 }
+        );
+        assert_eq!(
+            cpp_indirect_from(raw, &raw const large_input),
+            Large { x: 2, y: 40, z: 42 }
+        );
+    }
+}
+
+#[test]
+fn plain_implementation_methods_are_safe_without_an_object_allocation() {
+    let implementation = Returns { bias: 40 };
+    assert_eq!(implementation.small(9), Small { x: 9, y: 16 });
+    assert_eq!(implementation.large(2), Large { x: 2, y: 40, z: 42 });
+    assert_eq!(
+        implementation.pointer(std::ptr::null_mut()),
+        std::ptr::null_mut()
+    );
+    assert_eq!(implementation.wide(2), 42);
 }

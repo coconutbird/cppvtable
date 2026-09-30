@@ -108,11 +108,27 @@ pub unsafe trait IUnknown {
     /// The object writes the interface pointer to `out` and adds one public reference.
     /// It returns `E_NOINTERFACE` and writes a null pointer when it does not have the
     /// interface.
-    fn QueryInterface(&self, riid: *const GUID, out: *mut *mut c_void) -> HRESULT;
+    ///
+    /// # Safety
+    ///
+    /// `riid` must be null or aligned and readable for one `GUID`. `out` must be null
+    /// or aligned and writable for one pointer. Null arguments return `E_POINTER`.
+    unsafe fn QueryInterface(&self, riid: *const GUID, out: *mut *mut c_void) -> HRESULT;
 
     /// Add one public reference. The method returns the new public count.
-    fn AddRef(&self) -> u32;
+    ///
+    /// # Safety
+    ///
+    /// The caller must keep the object alive with an existing reference during the call.
+    unsafe fn AddRef(&self) -> u32;
 
     /// Remove one public reference. The method returns the new public count.
-    fn Release(&self) -> u32;
+    ///
+    /// # Safety
+    ///
+    /// The caller must own the reference being released. The object may be destroyed;
+    /// references to this interface must not be used afterward unless independently owned.
+    /// An owning Rust handle must relinquish that reference before this call so its
+    /// destructor does not release it again.
+    unsafe fn Release(&self) -> u32;
 }

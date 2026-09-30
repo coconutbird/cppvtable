@@ -47,7 +47,11 @@ pub unsafe trait IGeometry {
     /// A method with the shape of `CreateTexture`: more arguments than the lint
     /// `clippy::too_many_arguments` permits. The macro adds the expectation to each item
     /// that it makes, and the lint never fires on a method of a trait implementation.
-    fn CreateThing(
+    ///
+    /// # Safety
+    ///
+    /// `sum` must be null or aligned and writable for one `u32`. Null returns `E_POINTER`.
+    unsafe fn CreateThing(
         &self,
         width: u32,
         height: u32,
@@ -106,7 +110,7 @@ impl IGeometryImpl for Shape {
         S_OK
     }
 
-    fn CreateThing(
+    unsafe fn CreateThing(
         &self,
         width: u32,
         height: u32,
@@ -166,7 +170,7 @@ fn a_hidden_return_shim_writes_to_the_hidden_pointer_and_gives_it_back() {
     assert_eq!(given, &raw mut scaled);
     assert_eq!(scaled, Vector3 { x: 3, y: 6, z: 9 });
 
-    // The safe wrapper hides the pointer.
+    // The interface wrapper hides the pointer.
     // SAFETY: The object is alive.
     unsafe {
         assert_eq!(shape.GetOrigin(), Vector3 { x: 1, y: 2, z: 3 });

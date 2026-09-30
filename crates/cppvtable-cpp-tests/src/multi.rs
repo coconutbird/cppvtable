@@ -41,14 +41,22 @@ fn test_cpp_multi_inheritance_secondary_interface() {
 #[test]
 fn test_rust_multi_inheritance_cpp_calls_primary() {
     let rust_duck = OwnedObject::new(Duck::new(15));
-    assert_eq!(cpp_call_swim_speed(rust_duck.as_raw::<ISwimmer>()), 15);
+    // SAFETY: The owner keeps its matching swimmer interface alive.
+    assert_eq!(
+        unsafe { cpp_call_swim_speed(rust_duck.as_raw::<ISwimmer>()) },
+        15
+    );
 }
 
 /// Test C++ can call a Rust multi-inheritance object through its secondary interface.
 #[test]
 fn test_rust_multi_inheritance_cpp_calls_secondary() {
     let rust_duck = OwnedObject::new(Duck::new(15));
-    assert_eq!(cpp_call_fly_speed(rust_duck.as_raw::<IFlyer>()), 30);
+    // SAFETY: The owner keeps its matching flyer interface alive.
+    assert_eq!(
+        unsafe { cpp_call_fly_speed(rust_duck.as_raw::<IFlyer>()) },
+        30
+    );
 }
 
 /// Test generated interface pointers preserve multiple-inheritance adjustment.
@@ -70,13 +78,16 @@ fn test_multi_inheritance_layout() {
 #[test]
 fn test_cpp_interface_pointer_offsets() {
     let cpp_duck = create_cpp_duck(10);
-    let swimmer_ptr = cpp_duck_as_swimmer(cpp_duck);
-    let flyer_ptr = cpp_duck_as_flyer(cpp_duck);
+    // SAFETY: The factory allocation is a live CppDuck through both casts and deletion.
+    unsafe {
+        let swimmer_ptr = cpp_duck_as_swimmer(cpp_duck);
+        let flyer_ptr = cpp_duck_as_flyer(cpp_duck);
 
-    // In the supported nonvirtual multiple-inheritance layout, the secondary interface is offset from the primary.
-    let offset = (flyer_ptr as usize) - (swimmer_ptr as usize);
+        // In the supported nonvirtual multiple-inheritance layout, the secondary interface is offset from the primary.
+        let offset = (flyer_ptr as usize) - (swimmer_ptr as usize);
 
-    assert_eq!(offset, std::mem::size_of::<*const ()>());
+        assert_eq!(offset, std::mem::size_of::<*const ()>());
 
-    delete_cpp_duck(cpp_duck);
+        delete_cpp_duck(cpp_duck);
+    }
 }

@@ -35,7 +35,11 @@ pub unsafe trait IBaseTexture {
 #[interface(abi = com, iid = "3b0f0003-0000-4000-8000-000000000003", extends(IBaseTexture))]
 pub unsafe trait ITexture {
     /// Write the width of the level to `width`.
-    fn GetLevelWidth(&self, level: u32, width: *mut u32) -> HRESULT;
+    ///
+    /// # Safety
+    ///
+    /// `width` must be null or aligned and writable for one `u32`. Null returns `E_POINTER`.
+    unsafe fn GetLevelWidth(&self, level: u32, width: *mut u32) -> HRESULT;
 }
 
 /// The object of the chain.
@@ -69,7 +73,7 @@ impl IBaseTextureImpl for Texture {
 }
 
 impl ITextureImpl for Texture {
-    fn GetLevelWidth(&self, level: u32, width: *mut u32) -> HRESULT {
+    unsafe fn GetLevelWidth(&self, level: u32, width: *mut u32) -> HRESULT {
         if width.is_null() || level >= self.levels {
             return E_POINTER;
         }

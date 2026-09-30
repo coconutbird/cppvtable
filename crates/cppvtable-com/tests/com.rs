@@ -20,7 +20,11 @@ use cppvtable_com::{
 #[interface(abi = com, iid = "0a1b2c3d-0001-4000-8000-000000000001")]
 pub unsafe trait ICounter {
     /// Write the current value to `value`.
-    fn GetValue(&self, value: *mut u32) -> HRESULT;
+    ///
+    /// # Safety
+    ///
+    /// `value` must be null or aligned and writable for one `u32`. Null returns `E_POINTER`.
+    unsafe fn GetValue(&self, value: *mut u32) -> HRESULT;
     /// Add one to the value and give the new value.
     fn Increment(&self) -> u32;
 }
@@ -29,14 +33,17 @@ pub unsafe trait ICounter {
 #[interface(abi = com, iid = "0a1b2c3d-0002-4000-8000-000000000002")]
 pub unsafe trait INamed {
     /// Write the address of the name to `name`.
-    fn GetName(&self, name: *mut *const u8) -> HRESULT;
+    ///
+    /// # Safety
+    ///
+    /// `name` must be null or aligned and writable for one pointer. Null returns `E_POINTER`.
+    unsafe fn GetName(&self, name: *mut *const u8) -> HRESULT;
 }
 
 /// An object that implements both interfaces.
 ///
-/// The type is private. An implementation type of a frontend is always private, because
-/// only the interfaces are public. A public implementation type makes
-/// `clippy::not_unsafe_ptr_arg_deref` fire on each method that reads a raw pointer.
+/// Scalar implementation methods work directly on this Rust value. Methods that write
+/// through caller pointers have explicit unsafe contracts regardless of visibility.
 #[implement(ICounter, INamed)]
 struct Counter {
     /// The value of the counter.
@@ -57,7 +64,7 @@ impl Drop for Counter {
 }
 
 impl ICounterImpl for Counter {
-    fn GetValue(&self, value: *mut u32) -> HRESULT {
+    unsafe fn GetValue(&self, value: *mut u32) -> HRESULT {
         if value.is_null() {
             return E_POINTER;
         }
@@ -72,7 +79,7 @@ impl ICounterImpl for Counter {
 }
 
 impl INamedImpl for Counter {
-    fn GetName(&self, name: *mut *const u8) -> HRESULT {
+    unsafe fn GetName(&self, name: *mut *const u8) -> HRESULT {
         if name.is_null() {
             return E_POINTER;
         }
@@ -149,7 +156,7 @@ fn a_c_caller_reaches_the_methods_through_the_vtable() {
     let next = unsafe { ((*vtable).Increment)(this) };
     assert_eq!(next, 11);
 
-    // The same call through the safe wrapper gives the same answer.
+    // The same call through the interface wrapper gives the same answer.
     // SAFETY: The object is alive.
     let after = unsafe { object.Increment() };
     assert_eq!(after, 12);

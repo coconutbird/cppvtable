@@ -147,8 +147,10 @@ impl<I: ComInterface> ComPtr<I> {
     ///
     /// # Safety
     ///
-    /// `data` must be the value inside a live [`ComObject<T>`]. The `&self` of a method
-    /// of an interface always obeys this rule. A value on the stack does not.
+    /// `data` must be the value inside a live [`ComObject<T>`]. A generated vtable shim
+    /// supplies such a value, but a direct implementation-method call may use a
+    /// standalone Rust value. Its method contract must require this embedded allocation
+    /// when it calls `from_impl`.
     #[must_use]
     pub unsafe fn from_impl<T: Implements<I>>(data: &T) -> Self {
         // SAFETY: The caller gives the value inside a `ComObject<T>`.
@@ -344,8 +346,10 @@ where
     ///
     /// # Safety
     ///
-    /// `data` must be the value inside a live [`ComObject<T>`]. The `&self` of a method
-    /// of an interface always obeys this rule. A value on the stack does not.
+    /// `data` must be the value inside a live [`ComObject<T>`]. A generated vtable shim
+    /// supplies such a value, but a direct implementation-method call may use a
+    /// standalone Rust value. Its method contract must require this embedded allocation
+    /// when it calls `from_impl`.
     #[must_use]
     pub unsafe fn from_impl(data: &T) -> Self {
         // SAFETY: The caller gives the value inside a `ComObject<T>`.

@@ -8,6 +8,7 @@ fn main() {
         "src/returns.rs",
         "src/inheritance.rs",
         "src/c_table.rs",
+        "src/conventions.rs",
         "src/c_table.c",
         "src/com.rs",
     ] {

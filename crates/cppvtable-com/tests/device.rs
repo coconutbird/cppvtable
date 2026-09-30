@@ -28,16 +28,29 @@ use cppvtable_com::{
 #[interface(abi = com, iid = "d3d90001-0000-4000-8000-000000000001")]
 pub unsafe trait IDevice9 {
     /// Bind a texture to a stage. A null pointer clears the stage.
-    fn SetTexture(&self, stage: u32, texture: *mut c_void) -> HRESULT;
+    ///
+    /// # Safety
+    ///
+    /// `texture` must be null or a valid live COM interface pointer for the entire call.
+    unsafe fn SetTexture(&self, stage: u32, texture: *mut c_void) -> HRESULT;
     /// Give the bound texture of a stage. The call adds a public reference.
-    fn GetTexture(&self, stage: u32, texture: *mut *mut c_void) -> HRESULT;
+    ///
+    /// # Safety
+    ///
+    /// `texture` must be null or aligned and writable for one pointer. Null returns `E_POINTER`.
+    unsafe fn GetTexture(&self, stage: u32, texture: *mut *mut c_void) -> HRESULT;
 }
 
 /// The base interface of a resource.
 #[interface(abi = com, iid = "d3d90002-0000-4000-8000-000000000002")]
 pub unsafe trait IResource9 {
     /// Give the device of the resource. The call adds a public reference.
-    fn GetDevice(&self, device: *mut *mut c_void) -> HRESULT;
+    ///
+    /// # Safety
+    ///
+    /// The resource must have a live public reference keeping its device alive. `device`
+    /// must be null or aligned and writable for one pointer. Null returns `E_POINTER`.
+    unsafe fn GetDevice(&self, device: *mut *mut c_void) -> HRESULT;
 }
 
 /// A texture.
@@ -89,7 +102,7 @@ impl Drop for Device {
 }
 
 impl IDevice9Impl for Device {
-    fn SetTexture(&self, stage: u32, texture: *mut c_void) -> HRESULT {
+    unsafe fn SetTexture(&self, stage: u32, texture: *mut c_void) -> HRESULT {
         if stage != 0 {
             return E_POINTER;
         }
@@ -104,7 +117,7 @@ impl IDevice9Impl for Device {
         S_OK
     }
 
-    fn GetTexture(&self, stage: u32, texture: *mut *mut c_void) -> HRESULT {
+    unsafe fn GetTexture(&self, stage: u32, texture: *mut *mut c_void) -> HRESULT {
         if texture.is_null() {
             return E_POINTER;
         }
@@ -170,7 +183,7 @@ impl Drop for Texture {
 }
 
 impl IResource9Impl for Texture {
-    fn GetDevice(&self, device: *mut *mut c_void) -> HRESULT {
+    unsafe fn GetDevice(&self, device: *mut *mut c_void) -> HRESULT {
         if device.is_null() {
             return E_POINTER;
         }

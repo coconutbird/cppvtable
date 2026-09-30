@@ -70,6 +70,8 @@ fn create_cpp_dog(name: &str) -> *mut c_void {
     })
 }
 
+/// # Safety
+/// `animal` must be the live allocation returned by `create_cpp_dog`, owned by the caller.
 unsafe fn delete_cpp_dog(animal: *mut c_void) {
     cpp!(unsafe [animal as "IAnimal*"] {
         // This helper only receives the CppDog allocated by `create_cpp_dog`.
@@ -77,6 +79,8 @@ unsafe fn delete_cpp_dog(animal: *mut c_void) {
     });
 }
 
+/// # Safety
+/// `animal` must borrow a live implementation of the matching `IAnimal` interface.
 unsafe fn call_cpp_animal(animal: *mut c_void) -> i32 {
     cpp!(unsafe [animal as "IAnimal*"] -> i32 as "int" {
         animal->speak();
