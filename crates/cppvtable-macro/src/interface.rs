@@ -41,7 +41,7 @@ pub(crate) fn expand(args: TokenStream, item: &ItemTrait) -> Result<TokenStream,
         ));
     }
     let model = InterfaceModel::parse(item)?;
-    Ok(generate(&args, &model, Runtime::Com, true))
+    configure(generate(&args, &model, Runtime::Com, true), &model.cfgs)
 }
 
 /// Expand the standalone ABI crate's foreign interface macro.
@@ -62,7 +62,7 @@ pub(crate) fn expand_native(
         ));
     }
     let model = InterfaceModel::parse(item)?;
-    Ok(generate(&args, &model, Runtime::Native, true))
+    configure(generate(&args, &model, Runtime::Native, true), &model.cfgs)
 }
 
 fn expand_abi_with_runtime(
@@ -78,7 +78,18 @@ fn expand_abi_with_runtime(
         ));
     }
     let model = InterfaceModel::parse(item)?;
-    Ok(generate(&args, &model, runtime, false))
+    configure(generate(&args, &model, runtime, false), &model.cfgs)
+}
+
+/// Put the declaration's `#[cfg]` attributes on every generated item, so a false
+/// predicate removes all of them together.
+fn configure(tokens: TokenStream, cfgs: &[syn::Attribute]) -> Result<TokenStream, syn::Error> {
+    if cfgs.is_empty() {
+        return Ok(tokens);
+    }
+    let file: syn::File = syn::parse2(tokens)?;
+    let items = file.items.iter().map(|item| quote! { #(#cfgs)* #item });
+    Ok(quote! { #(#items)* })
 }
 
 /// Make the whole output of the macro.
@@ -114,36 +125,30 @@ fn generate(
         quote! { #krate::ComImplement }
     };
     let generate_shims = implementable && (!args.root || is_plain);
+    let variants = args.abi.variants(model.uses_x86_conventions());
+    let hook = (is_plain && args.layout == Layout::Pointer).then(|| hook_method(&krate, vis));
 
-    let mut output = match args.abi {
-        Abi::Msvc => quote! {
-            #[cfg(not(target_env = "msvc"))]
-            compile_error!("abi = msvc requires an MSVC target; use abi = cpp for the target default");
-        },
-        Abi::Itanium => quote! {
-            #[cfg(target_env = "msvc")]
-            compile_error!("abi = itanium requires a non-MSVC target; use abi = cpp for the target default");
-        },
-        _ => TokenStream::new(),
-    };
-    for variant in args.abi.variants() {
+    let mut output = args.abi.target_guard();
+    for variant in &variants {
         output.extend(vtable_struct(
             model,
-            &variant,
+            variant,
             &base,
             &krate,
             &vtbl_name,
             trailing_slots.as_ref(),
         ));
         if generate_shims {
-            output.extend(shims(model, &variant, &object, &impl_name));
+            output.extend(shims(model, variant, &object, &impl_name));
         }
     }
     output.extend(interface_type(
         model,
+        args.layout,
         &abi_crate,
         &vtbl_name,
-        &args.abi.variants(),
+        &variants,
+        hook.as_ref(),
     ));
     output.extend(interface_trait_impl(
         args, model, &base, &krate, &abi_crate, &vtbl_name, is_plain,
@@ -222,7 +227,7 @@ fn vtable_struct(
 ) -> TokenStream {
     let vis = &model.vis;
     let name = &model.name;
-    let cfg = &variant.cfg;
+    let cfg = variant.cfg();
     let convention = variant.convention;
     let trailing_field = trailing_slots.map(|count| {
         quote! {
@@ -297,12 +302,11 @@ fn hidden_parameters(variant: &AbiVariant, ret: &TokenStream) -> TokenStream {
     }
 }
 
-/// Use the method override consistently for its vtable field and shim.
+/// Use the method override consistently for its vtable field, shim, and caller.
+///
+/// An x86-only override lowers to `"C"` in the versions for other architectures.
 fn method_convention(method: &Method, variant: &AbiVariant) -> syn::LitStr {
-    method
-        .convention
-        .clone()
-        .unwrap_or_else(|| syn::LitStr::new(variant.convention, proc_macro2::Span::call_site()))
+    variant.convention_for(method.convention.as_ref())
 }
 
 /// Give the type of the function pointer of a method.
@@ -348,7 +352,7 @@ fn shims(
     object: &TokenStream,
     impl_name: &Ident,
 ) -> TokenStream {
-    let cfg = &variant.cfg;
+    let cfg = variant.cfg();
     let name = &model.name;
     let items = model.slots.iter().filter_map(|slot| {
         let method = slot.method.as_ref()?;
@@ -358,6 +362,14 @@ fn shims(
         let names: Vec<&Ident> = method.params.iter().map(|param| &param.name).collect();
         let types = method.params.iter().map(|param| &param.ty);
         let doc = format!("The shim of [`{name}::{method_name}`].");
+        let allow = method.deprecated.then(|| {
+            quote! {
+                #[allow(
+                    deprecated,
+                    reason = "The shim calls the implementation of a deprecated method."
+                )]
+            }
+        });
         Some(match effective_kind(method.kind, variant) {
             ReturnKind::Hidden => {
                 let ret = return_type(method);
@@ -367,6 +379,7 @@ fn shims(
                     #[doc = #doc]
                     #cfg
                     #expect
+                    #allow
                     unsafe extern #convention fn #shim<T: #impl_name, const SLOT: usize>(
                         #prefix
                         #(#names: #types),*
@@ -387,6 +400,7 @@ fn shims(
                     #[doc = #doc]
                     #cfg
                     #expect
+                    #allow
                     unsafe extern #convention fn #shim<T: #impl_name, const SLOT: usize>(
                         this: *mut ::core::ffi::c_void,
                         #(#names: #types),*
@@ -403,27 +417,60 @@ fn shims(
     quote! { #(#items)* }
 }
 
+/// Give `#[allow(deprecated)]` for the generated items that name a deprecated interface.
+fn allow_deprecated(model: &InterfaceModel) -> Option<TokenStream> {
+    model.deprecated.then(|| {
+        quote! {
+            #[allow(
+                deprecated,
+                reason = "The generated items implement the deprecated interface."
+            )]
+        }
+    })
+}
+
 /// Make the interface type and its methods.
 fn interface_type(
     model: &InterfaceModel,
+    layout: Layout,
     abi_crate: &TokenStream,
     vtbl_name: &Ident,
     variants: &[AbiVariant],
+    hook: Option<&TokenStream>,
 ) -> TokenStream {
     let name = &model.name;
     let vis = &model.vis;
     let docs = &model.docs;
+    let attrs = &model.attrs;
+    let allow = allow_deprecated(model);
     let type_doc = format!(
         "The interface `{name}`.\n\n\
-         The type is a transparent wrapper of one interface pointer. Borrow a raw \
-         pointer with `from_raw_ref`; its caller keeps the foreign object alive."
+         The type is a transparent wrapper of one interface pointer. Borrow a foreign \
+         pointer with [`{name}::from_raw`] or [`{name}::from_non_null`]; the caller keeps \
+         the object alive for the borrow. A value of this type exists only behind a borrow \
+         and cannot be copied out of it, so it never outlives its object.\n\n\
+         Methods declared `fn` are safe to call. The `unsafe trait` declaration is the \
+         proof: it promises that the slot order, signatures, calling conventions, and \
+         return lowering match the foreign header, that every method declared as a safe \
+         `fn` has no precondition beyond a live object, and that no method unwinds. \
+         Methods declared `unsafe fn` keep the preconditions that they document.\n\n\
+         The debug output is `{name}(0x…)`, and equality compares the interface pointers."
     );
+    let debug_format = format!("{name}({{:p}})");
+    let vtable_body = match layout {
+        Layout::Pointer => quote! {
+            unsafe { &**self.as_raw().cast::<*const #vtbl_name>() }
+        },
+        Layout::Inline => quote! {
+            unsafe { &*self.as_raw().cast::<#vtbl_name>() }
+        },
+    };
 
     let methods = variants.iter().flat_map(|variant| {
         model.slots.iter().filter_map(move |slot| {
             let method = slot.method.as_ref()?;
-            let cfg = &variant.cfg;
-            let caller = caller_method(method, abi_crate, vis, variant);
+            let cfg = variant.cfg();
+            let caller = caller_method(method, vis, variant);
             Some(quote! { #cfg #caller })
         })
     });
@@ -437,9 +484,20 @@ fn interface_type(
         #(#docs)*
         #[doc = ""]
         #[doc = #type_doc]
+        #(#attrs)*
         #[repr(transparent)]
-        #vis struct #name(::core::ptr::NonNull<::core::ffi::c_void>);
+        #vis struct #name(#abi_crate::RawInterface);
 
+        #allow
+        const _: () = assert!(
+            ::core::mem::size_of::<#name>() == ::core::mem::size_of::<*mut ::core::ffi::c_void>()
+                && ::core::mem::size_of::<
+                    ::core::option::Option<#abi_crate::InterfaceRef<'static, #name>>,
+                >() == ::core::mem::size_of::<*mut ::core::ffi::c_void>(),
+            "an interface and an optional interface reference must be one pointer"
+        );
+
+        #allow
         #expect
         impl #name {
             /// Give the raw interface pointer.
@@ -449,69 +507,154 @@ fn interface_type(
                 self.0.as_ptr()
             }
 
-            /// Borrow a raw interface pointer as an interface reference.
-            ///
-            /// Use it to call the methods of an object without a change of a count.
+            /// Borrow a raw interface pointer. A null pointer gives `None`.
             ///
             /// # Safety
             ///
-            /// The place must hold a valid interface pointer of this interface, and the
-            /// object must be alive during the life of the reference.
+            /// A non-null `raw` must be a valid interface pointer of this interface for
+            /// the whole lifetime `'a`: the object must stay alive, its function table
+            /// must stay valid and unmodified, and the object must implement this
+            /// declaration.
             #[inline]
             #[must_use]
-            #vis unsafe fn from_raw_ref(place: &*mut ::core::ffi::c_void) -> &Self {
-                unsafe { &*::core::ptr::from_ref(place).cast::<Self>() }
+            #vis unsafe fn from_raw<'a>(
+                raw: *mut ::core::ffi::c_void,
+            ) -> ::core::option::Option<#abi_crate::InterfaceRef<'a, Self>> {
+                unsafe { #abi_crate::InterfaceRef::from_raw(raw) }
             }
 
-            /// Give the vtable of the object.
+            /// Borrow a non-null raw interface pointer.
+            ///
+            /// # Safety
+            ///
+            /// `raw` must be a valid interface pointer of this interface for the whole
+            /// lifetime `'a`: the object must stay alive, its function table must stay
+            /// valid and unmodified, and the object must implement this declaration.
             #[inline]
             #[must_use]
-            #vis fn vtable(&self) -> *const #vtbl_name {
-                #abi_crate::vtable_of::<Self>(self)
+            #vis unsafe fn from_non_null<'a>(
+                raw: ::core::ptr::NonNull<::core::ffi::c_void>,
+            ) -> #abi_crate::InterfaceRef<'a, Self> {
+                unsafe { #abi_crate::InterfaceRef::from_non_null(raw) }
             }
+
+            /// Give the function table of the object, borrowed as long as `self`.
+            #[inline]
+            #[must_use]
+            #vis fn vtable(&self) -> &#vtbl_name {
+                #vtable_body
+            }
+
+            #hook
 
             #(#methods)*
+        }
+
+        #allow
+        impl ::core::fmt::Debug for #name {
+            fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                ::core::write!(f, #debug_format, self.as_raw())
+            }
+        }
+
+        #allow
+        impl ::core::cmp::PartialEq for #name {
+            #[inline]
+            fn eq(&self, other: &Self) -> bool {
+                ::core::ptr::eq(self.as_raw(), other.as_raw())
+            }
+        }
+
+        #allow
+        impl ::core::cmp::Eq for #name {}
+    }
+}
+
+/// Make the `hook` method of a native pointer-layout interface.
+fn hook_method(krate: &TokenStream, vis: &Visibility) -> TokenStream {
+    quote! {
+        /// Hook the vtable of this object with `cppvtable::hook::VtableHook::new`.
+        ///
+        /// Edit the active table with `VtableHook::set`, `hook`, and `unhook`. Dropping
+        /// the hook restores the original table.
+        ///
+        /// # Safety
+        ///
+        /// The contract of `VtableHook::new` applies. In short: the object must stay
+        /// live with no concurrent access to its vtable pointer until the hook drops; the
+        /// ordinary RTTI prefix of this interface's C++ ABI (none for C tables) must be
+        /// readable before the table, so a Rust `OwnedObject` without an `RttiClass`
+        /// needs `VtableHook::with_prefix(.., 0)` instead; every replacement must honor
+        /// the declared signature, convention, and safety of its method, because
+        /// callers may call safe methods without `unsafe`; no `&Vtbl` borrow of the
+        /// active table may be alive while it is edited; `Patch` mode needs a writable
+        /// table without concurrent callers; stacked hooks drop in reverse order.
+        ///
+        /// # Panics
+        ///
+        /// Panics if the vtable has no entries.
+        #[must_use = "dropping the hook restores the original table"]
+        #vis unsafe fn hook(
+            &self,
+            mode: #krate::hook::HookMode,
+        ) -> #krate::hook::VtableHook<'_, Self> {
+            unsafe { #krate::hook::VtableHook::new(self, mode) }
         }
     }
 }
 
+/// Tell if the documentation of a method already has a `# Safety` section.
+fn has_safety_section(docs: &[syn::Attribute]) -> bool {
+    docs.iter().any(|attr| match &attr.meta {
+        syn::Meta::NameValue(pair) => matches!(
+            &pair.value,
+            syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(text), .. })
+                if text.value().trim() == "# Safety"
+        ),
+        syn::Meta::Path(_) | syn::Meta::List(_) => false,
+    })
+}
+
 /// Make one method of the interface type. The method calls through the vtable.
-fn caller_method(
-    method: &Method,
-    krate: &TokenStream,
-    vis: &Visibility,
-    variant: &AbiVariant,
-) -> TokenStream {
+///
+/// A method declared `fn` gives a safe caller; the `unsafe trait` declaration proves
+/// that a live object makes it sound. A method declared `unsafe fn` gives an unsafe
+/// caller with the documented preconditions.
+fn caller_method(method: &Method, vis: &Visibility, variant: &AbiVariant) -> TokenStream {
     let docs = &method.docs;
+    let attrs = &method.attrs;
+    let unsafety = &method.unsafety;
     let name = &method.name;
     let names: Vec<&Ident> = method.params.iter().map(|param| &param.name).collect();
     let types = method.params.iter().map(|param| &param.ty);
     let expect = many_arguments_expect(method.params.len() + 1);
+    let safety = (method.unsafety.is_some() && !has_safety_section(docs)).then(|| {
+        quote! {
+            ///
+            /// # Safety
+            ///
+            /// The arguments must meet the preconditions that the declaration of this
+            /// method documents.
+        }
+    });
     match effective_kind(method.kind, variant) {
         ReturnKind::Hidden => {
             let ret = return_type(method);
             let arguments = if variant.hidden_before_this {
-                quote! { result.as_mut_ptr(), #krate::raw_of::<Self>(self) }
+                quote! { __cppvtable_result.as_mut_ptr(), self.as_raw() }
             } else {
-                quote! { #krate::raw_of::<Self>(self), result.as_mut_ptr() }
+                quote! { self.as_raw(), __cppvtable_result.as_mut_ptr() }
             };
             quote! {
                 #(#docs)*
-                ///
-                /// # Safety
-                ///
-                /// The call goes through the vtable of a foreign object. The object must
-                /// be alive, and each argument must obey the rules of the interface. The
-                /// method uses the hidden return pointer of the MSVC ABI.
+                #safety
+                #(#attrs)*
                 #expect
-                #vis unsafe fn #name(&self #(, #names: #types)*) -> #ret {
+                #vis #unsafety fn #name(&self #(, #names: #types)*) -> #ret {
+                    let mut __cppvtable_result = ::core::mem::MaybeUninit::<#ret>::uninit();
                     unsafe {
-                        let mut result = ::core::mem::MaybeUninit::<#ret>::uninit();
-                        ((*#krate::vtable_of::<Self>(self)).#name)(
-                            #arguments
-                            #(, #names)*
-                        );
-                        result.assume_init()
+                        (self.vtable().#name)(#arguments #(, #names)*);
+                        __cppvtable_result.assume_init()
                     }
                 }
             }
@@ -520,19 +663,11 @@ fn caller_method(
             let output = &method.output;
             quote! {
                 #(#docs)*
-                ///
-                /// # Safety
-                ///
-                /// The call goes through the vtable of a foreign object. The object must
-                /// be alive, and each argument must obey the rules of the interface.
+                #safety
+                #(#attrs)*
                 #expect
-                #vis unsafe fn #name(&self #(, #names: #types)*) #output {
-                    unsafe {
-                        ((*#krate::vtable_of::<Self>(self)).#name)(
-                            #krate::raw_of::<Self>(self)
-                            #(, #names)*
-                        )
-                    }
+                #vis #unsafety fn #name(&self #(, #names: #types)*) #output {
+                    unsafe { (self.vtable().#name)(self.as_raw() #(, #names)*) }
                 }
             }
         }
@@ -543,12 +678,8 @@ fn caller_method(
 fn cpp_abi_metadata(abi: Abi, abi_crate: &TokenStream) -> TokenStream {
     match abi {
         Abi::Cpp => quote! {
-            const CPP_ABI: ::core::option::Option<#abi_crate::rtti::CppAbi> = {
-                #[cfg(target_env = "msvc")]
-                { ::core::option::Option::Some(#abi_crate::rtti::CppAbi::Msvc) }
-                #[cfg(not(target_env = "msvc"))]
-                { ::core::option::Option::Some(#abi_crate::rtti::CppAbi::Itanium) }
-            };
+            const CPP_ABI: ::core::option::Option<#abi_crate::rtti::CppAbi> =
+                ::core::option::Option::Some(#abi_crate::rtti::CppAbi::TARGET);
         },
         Abi::Msvc => quote! {
             const CPP_ABI: ::core::option::Option<#abi_crate::rtti::CppAbi> =
@@ -559,6 +690,48 @@ fn cpp_abi_metadata(abi: Abi, abi_crate: &TokenStream) -> TokenStream {
                 ::core::option::Option::Some(#abi_crate::rtti::CppAbi::Itanium);
         },
         Abi::C | Abi::Com => TokenStream::new(),
+    }
+}
+
+/// Make the implementation of the trait `ComInterface`.
+fn com_interface_impl(
+    args: &InterfaceArgs,
+    model: &InterfaceModel,
+    base: &Base,
+    krate: &TokenStream,
+) -> TokenStream {
+    let name = &model.name;
+    let allow = allow_deprecated(model);
+    let guid = args.iid.as_ref().expect("COM arguments require an IID");
+    let data1 = guid.data1;
+    let data2 = guid.data2;
+    let data3 = guid.data3;
+    let data4 = guid.data4;
+    let ancestors = match base.interface_type(krate) {
+        None => quote! { &[] },
+        Some(base_type) => quote! {
+            {
+                const LENGTH: usize = <#base_type as #krate::ComInterface>::ANCESTORS.len() + 1;
+                const LIST: [#krate::GUID; LENGTH] = {
+                    let mut list = [<#base_type as #krate::ComInterface>::IID; LENGTH];
+                    let source = <#base_type as #krate::ComInterface>::ANCESTORS;
+                    let mut index = 0;
+                    while index < source.len() {
+                        list[index + 1] = source[index];
+                        index += 1;
+                    }
+                    list
+                };
+                &LIST
+            }
+        },
+    };
+    quote! {
+        #allow
+        unsafe impl #krate::ComInterface for #name {
+            const IID: #krate::GUID = #krate::GUID::from_values(#data1, #data2, #data3, [#(#data4),*]);
+            const ANCESTORS: &'static [#krate::GUID] = #ancestors;
+        }
     }
 }
 
@@ -574,12 +747,14 @@ fn interface_trait_impl(
 ) -> TokenStream {
     let name = &model.name;
     let name_text = name.to_string();
+    let allow = allow_deprecated(model);
     let cpp_abi = cpp_abi_metadata(args.abi, abi_crate);
     let layout = match args.layout {
         Layout::Pointer => quote! { #abi_crate::VtableLayout::Pointer },
         Layout::Inline => quote! { #abi_crate::VtableLayout::Inline },
     };
     let base_layout_check = base.interface_type(krate).map(|base| quote! {
+        #allow
         const _: () = assert!(
             matches!(
                 (<#base as #abi_crate::Interface>::LAYOUT, <#name as #abi_crate::Interface>::LAYOUT),
@@ -598,36 +773,7 @@ fn interface_trait_impl(
         }
     });
     let extra = if args.abi.is_com() {
-        let guid = args.iid.as_ref().expect("COM arguments require an IID");
-        let data1 = guid.data1;
-        let data2 = guid.data2;
-        let data3 = guid.data3;
-        let data4 = guid.data4;
-        let ancestors = match base.interface_type(krate) {
-            None => quote! { &[] },
-            Some(base_type) => quote! {
-                {
-                    const LENGTH: usize = <#base_type as #krate::ComInterface>::ANCESTORS.len() + 1;
-                    const LIST: [#krate::GUID; LENGTH] = {
-                        let mut list = [<#base_type as #krate::ComInterface>::IID; LENGTH];
-                        let source = <#base_type as #krate::ComInterface>::ANCESTORS;
-                        let mut index = 0;
-                        while index < source.len() {
-                            list[index + 1] = source[index];
-                            index += 1;
-                        }
-                        list
-                    };
-                    &LIST
-                }
-            },
-        };
-        quote! {
-            unsafe impl #krate::ComInterface for #name {
-                const IID: #krate::GUID = #krate::GUID::from_values(#data1, #data2, #data3, [#(#data4),*]);
-                const ANCESTORS: &'static [#krate::GUID] = #ancestors;
-            }
-        }
+        com_interface_impl(args, model, base, krate)
     } else if is_plain {
         let matches_base = base.interface_type(krate).map(|ty| {
             quote! {
@@ -645,6 +791,7 @@ fn interface_trait_impl(
             )
         };
         quote! {
+            #allow
             unsafe impl #krate::CppInterface for #name {
                 type Storage = #storage_type;
                 fn storage(vtable: &'static Self::Vtbl) -> Self::Storage {
@@ -659,6 +806,7 @@ fn interface_trait_impl(
         TokenStream::new()
     };
     quote! {
+        #allow
         unsafe impl #abi_crate::Interface for #name {
             type Vtbl = #vtbl_name;
             const NAME: &'static str = #name_text;
@@ -677,7 +825,9 @@ fn deref_to_base(model: &InterfaceModel, base: &Base, krate: &TokenStream) -> To
     let Some(base_type) = base.interface_type(krate) else {
         return TokenStream::new();
     };
+    let allow = allow_deprecated(model);
     quote! {
+        #allow
         impl ::core::ops::Deref for #name {
             type Target = #base_type;
 
@@ -705,18 +855,21 @@ fn impl_trait(
          method takes `&self` to permit reentrant foreign calls. Use interior mutability \
          for state that changes. Thread access must obey the interface and owning \
          object's contract; `&self` does not authorize arbitrary concurrent calls.\n\n\
-         These methods can also be called directly on a standalone Rust value. A safe \
-         method must accept every argument permitted by its Rust signature and cannot \
-         assume that `self` is embedded in an object allocation. Declare a method \
+         These methods can also be called directly on a standalone Rust value, and the \
+         safe callers of [`{name}`] reach them through the vtable without `unsafe`. A \
+         safe method must accept every argument permitted by its Rust signature and \
+         cannot assume that `self` is embedded in an object allocation. Declare a method \
          `unsafe fn` and document its preconditions when it requires valid foreign \
          pointers or an embedded `self`. The declaration's method safety is preserved \
          exactly; pointer types do not imply unsafety automatically. Generated vtable \
          shims recover `self` from a live object allocation before invoking a method; \
-         foreign callers must uphold the declared method preconditions."
+         foreign callers must uphold the declared method preconditions. A panic that \
+         reaches a shim aborts the process."
     );
     let methods = model.slots.iter().filter_map(|slot| {
         let method = slot.method.as_ref()?;
         let docs = &method.docs;
+        let attrs = &method.attrs;
         let method_name = &method.name;
         let names = method.params.iter().map(|param| &param.name);
         let types = method.params.iter().map(|param| &param.ty);
@@ -725,6 +878,7 @@ fn impl_trait(
         let expect = many_arguments_expect(method.params.len() + 1);
         Some(quote! {
             #(#docs)*
+            #(#attrs)*
             #expect
             #unsafety fn #method_name(&self #(, #names: #types)*) #output;
         })

@@ -2,7 +2,10 @@
 //!
 //! A COM object of this crate has one policy. The policy owns the counts and decides
 //! when the object is destroyed. A type selects its policy with
-//! [`RefCounted::Policy`].
+//! [`RefCounted::Policy`]. A type with the default hooks selects [`SingleRefCount`] or
+//! [`DualRefCount`] with `#[implement(IThing, refcount = single)]` or
+//! `#[implement(IThing, refcount = dual)]`; the macro then writes the `RefCounted`
+//! implementation.
 //!
 //! | Policy | Counts | Destruction |
 //! | ------ | ------ | ----------- |
@@ -39,7 +42,7 @@
 //! 8. **Destruction happens one time.** The object model has one destruction site, in
 //!    [`crate::ComObject`]. The `Drop` implementation of the Rust type runs there.
 //! 9. **A child with [`ForwardRefCount`] dies with its container.** The container owns
-//!    an [`crate::OwnedObject`] of the child. The child is destroyed when the `Drop` of
+//!    a [`crate::ChildObject`] of the child. The child is destroyed when the `Drop` of
 //!    the container type drops that handle.
 //! 10. **Count operations synchronize lifetime transitions.** Each read-modify-write
 //!     uses `AcqRel` and each load uses `Acquire`. The final reference release observes
@@ -169,7 +172,7 @@ pub unsafe trait PrivatePolicy: RefCountPolicy {
 /// A policy of an object that owns itself.
 ///
 /// [`ComObject::new`] works only with such a policy. An object with
-/// [`ForwardRefCount`] belongs to a container, so it uses [`crate::OwnedObject`].
+/// [`ForwardRefCount`] belongs to a container, so it uses [`crate::ChildObject`].
 ///
 /// # Safety
 ///
@@ -178,7 +181,11 @@ pub unsafe trait StandalonePolicy: RefCountPolicy {}
 
 /// The reference count behaviour of an implementation type.
 ///
-/// Each type that `#[implement]` uses must implement this trait.
+/// Each type that `#[implement]` uses must implement this trait. With the default
+/// hooks, `#[implement(IThing, refcount = single)]` or `refcount = dual` writes the
+/// implementation. It fails to compile when an implemented interface is an
+/// [`crate::AgileInterface`] and the type is not `Send + Sync`. Write the
+/// implementation by hand for [`ForwardRefCount`] or for custom hooks:
 ///
 /// ```ignore
 /// unsafe impl RefCounted for VertexBuffer {

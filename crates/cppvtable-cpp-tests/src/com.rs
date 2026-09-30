@@ -217,15 +217,13 @@ fn rust_calls_native_com_clone_cast_identity_and_final_release() {
     let pointer = unsafe {
         ComPtr::<IComFixtureFirst>::from_raw_unchecked(cpp_create_native_com(&raw mut drops))
     };
-    // SAFETY: The native object is alive and its methods take no raw arguments.
-    assert_eq!(unsafe { pointer.FirstValue() }, 41);
+    assert_eq!(pointer.FirstValue(), 41);
     let copy = pointer.clone();
     // SAFETY: `pointer` still owns a live native primary interface.
     assert_eq!(unsafe { cpp_native_public_count(pointer.as_raw()) }, 2);
     let second = pointer.cast::<IComFixtureSecond>().unwrap();
     assert_ne!(second.as_raw(), pointer.as_raw());
-    // SAFETY: The secondary owning pointer keeps the object alive.
-    assert_eq!(unsafe { second.SecondValue() }, 99);
+    assert_eq!(second.SecondValue(), 99);
     let first_identity = pointer.cast::<IUnknown>().unwrap();
     let second_identity = second.cast::<IUnknown>().unwrap();
     assert_eq!(first_identity.as_raw(), pointer.as_raw());

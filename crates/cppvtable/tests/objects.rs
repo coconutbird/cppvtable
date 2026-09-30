@@ -54,7 +54,8 @@ impl IDerivedImpl for Counter {
 
 impl ISecondaryImpl for Counter {
     unsafe fn identity(&self) -> *mut c_void {
-        unsafe { interface_of::<Self, IDerived>(self) }
+        // SAFETY: The caller guarantees `self` is embedded in a live object.
+        unsafe { interface_of::<IDerived>(self) }.as_raw()
     }
     fn set(&self, value: u32) {
         self.value.set(value);
@@ -80,23 +81,22 @@ fn inherited_and_secondary_vtables_recover_the_same_implementation() {
         secondary.as_raw() as usize - primary.as_raw() as usize,
         size_of::<usize>()
     );
-    assert_eq!(unsafe { primary.value() }, 17);
-    assert_eq!(unsafe { primary.add(3) }, 20);
+    assert_eq!(primary.value(), 17);
+    assert_eq!(primary.add(3), 20);
+    // SAFETY: `secondary` belongs to the live `Object<Counter>`.
     assert_eq!(unsafe { secondary.identity() }, primary.as_raw());
     // SAFETY: The value is borrowed from its live allocation, as identity requires.
     assert_eq!(
-        unsafe { ISecondaryImpl::identity(owner.get()) },
+        unsafe { ISecondaryImpl::identity(&*owner) },
         primary.as_raw()
     );
-    unsafe {
-        secondary.set(40);
-    }
-    assert_eq!(unsafe { primary.value() }, 40);
-    let base = owner.query_interface::<IBase>().unwrap();
+    secondary.set(40);
+    assert_eq!(primary.value(), 40);
+    let base = owner.try_interface::<IBase>().unwrap();
     assert_eq!(base.as_raw(), primary.as_raw());
-    assert_eq!(unsafe { base.value() }, 40);
-    assert!(owner.query_interface::<IUnsupported>().is_none());
-    let vtable = unsafe { &*secondary.vtable() };
+    assert_eq!(base.value(), 40);
+    assert!(owner.try_interface::<IUnsupported>().is_none());
+    let vtable = secondary.vtable();
     assert!(vtable.reserved_1.is_none());
     assert!(vtable.reserved_2.is_none());
     drop(owner);
@@ -106,7 +106,7 @@ fn inherited_and_secondary_vtables_recover_the_same_implementation() {
 #[test]
 fn moving_owner_and_transferring_raw_ownership_preserve_address_and_drop_once() {
     let drops = Rc::new(Cell::new(0));
-    let owner = Object::new(Counter {
+    let owner = OwnedObject::new(Counter {
         value: Cell::new(5),
         drops: drops.clone(),
     });
@@ -116,8 +116,9 @@ fn moving_owner_and_transferring_raw_ownership_preserve_address_and_drop_once() 
     let raw = (*moved).into_raw();
     assert_eq!(raw.cast::<c_void>(), primary);
     assert_eq!(drops.get(), 0);
+    // SAFETY: `raw` came from `into_raw` and is restored once.
     let restored = unsafe { OwnedObject::from_raw(raw) };
-    assert_eq!(unsafe { restored.interface::<IDerived>().value() }, 5);
+    assert_eq!(restored.interface::<IDerived>().value(), 5);
     drop(restored);
     assert_eq!(drops.get(), 1);
 }

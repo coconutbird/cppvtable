@@ -55,19 +55,15 @@ fn extent_includes_the_entire_base_and_reserves_unknown_entries() {
     let object = OwnedObject::new(Partial);
     let derived = object.interface::<IDerived>();
     let exact = object.interface::<IExact>();
-    // SAFETY: Both interfaces belong to the live owner; the methods have no extra
-    // preconditions. No reserved entry is invoked.
-    unsafe {
-        assert_eq!(derived.known(), 32);
-        assert_eq!(derived.extra(), 52);
-        assert_eq!(exact.known(), 32);
-        assert_eq!(exact.extra(), 50);
-        let vtable = &*derived.vtable();
-        assert!(vtable.base.reserved_0.is_none());
-        assert!(vtable.base.reserved_31.is_none());
-        assert!(vtable.base.__reserved_tail.iter().all(Option::is_none));
-        assert!(vtable.reserved_0.is_none());
-        assert!(vtable.reserved_1.is_none());
-        assert!(vtable.__reserved_tail.iter().all(Option::is_none));
-    }
+    assert_eq!(derived.known(), 32);
+    assert_eq!(derived.extra(), 52);
+    assert_eq!(exact.known(), 32);
+    assert_eq!(exact.extra(), 50);
+    let vtable = derived.vtable();
+    assert!(vtable.base.reserved_0.is_none());
+    assert!(vtable.base.reserved_31.is_none());
+    assert!(vtable.base.__reserved_tail.iter().all(Option::is_none));
+    assert!(vtable.reserved_0.is_none());
+    assert!(vtable.reserved_1.is_none());
+    assert!(vtable.__reserved_tail.iter().all(Option::is_none));
 }

@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use cppvtable_com::{ComInterface, GUID, Interface};
 use cppvtable_com::{
-    ComObject, ComPtr, E_NOINTERFACE, E_POINTER, HRESULT, IUnknown, IUnknownVtbl, RefCounted, S_OK,
-    SingleRefCount, implement, interface,
+    ComObject, ComPtr, E_NOINTERFACE, E_POINTER, HRESULT, IUnknown, IUnknownVtbl, S_OK, implement,
+    interface,
 };
 
 /// A counter interface.
@@ -44,17 +44,12 @@ pub unsafe trait INamed {
 ///
 /// Scalar implementation methods work directly on this Rust value. Methods that write
 /// through caller pointers have explicit unsafe contracts regardless of visibility.
-#[implement(ICounter, INamed)]
+#[implement(ICounter, INamed, refcount = single)]
 struct Counter {
     /// The value of the counter.
     value: AtomicU32,
     /// The test counts the destructions here.
     drops: Arc<AtomicU32>,
-}
-
-// SAFETY: Hooks obey the reference-count contract and all returned pointers stay live.
-unsafe impl RefCounted for Counter {
-    type Policy = SingleRefCount;
 }
 
 impl Drop for Counter {
@@ -157,8 +152,7 @@ fn a_c_caller_reaches_the_methods_through_the_vtable() {
     assert_eq!(next, 11);
 
     // The same call through the interface wrapper gives the same answer.
-    // SAFETY: The object is alive.
-    let after = unsafe { object.Increment() };
+    let after = object.Increment();
     assert_eq!(after, 12);
 }
 
@@ -264,10 +258,14 @@ fn the_counts_and_the_destruction_are_correct() {
 }
 
 #[test]
-fn a_clone_adds_a_reference_and_a_drop_removes_it() {
+fn a_clone_or_a_borrow_adds_a_reference_and_a_drop_removes_it() {
     let (object, drops) = new_counter();
     let second = object.clone();
     assert_eq!(second.public_count_of::<Counter>(), Some(2));
+    let third = ComPtr::from_ref(&*object);
+    assert_eq!(third.as_raw(), object.as_raw());
+    assert_eq!(object.public_count_of::<Counter>(), Some(3));
+    drop(third);
     drop(second);
     assert_eq!(object.public_count_of::<Counter>(), Some(1));
     assert_eq!(drops.load(Ordering::Relaxed), 0);

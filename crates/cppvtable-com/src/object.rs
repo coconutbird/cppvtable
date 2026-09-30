@@ -22,6 +22,7 @@
 
 use alloc::boxed::Box;
 use core::ffi::c_void;
+use core::fmt;
 use core::mem::{offset_of, size_of};
 use core::ptr::NonNull;
 
@@ -197,7 +198,7 @@ impl<T: ComImplement> ComObject<T> {
     /// The caller must own the last reference of the object. No other reference may
     /// exist, and nobody may use the object after the call.
     pub unsafe fn destroy(object: *const Self) {
-        // SAFETY: `ComObject::new` and `OwnedObject::new` make the allocation with
+        // SAFETY: `ComObject::new` and `ChildObject::new` make the allocation with
         // `Box`. The caller owns the last reference, so this is the only `Box` that the
         // pointer becomes.
         drop(unsafe { Box::from_raw(object.cast_mut()) });
@@ -241,14 +242,27 @@ where
     }
 }
 
-/// An owning handle of an object that does not own itself.
+impl<T: ComImplement> fmt::Debug for ComObject<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "ComObject<{}>({:p})",
+            core::any::type_name::<T>(),
+            core::ptr::from_ref(self)
+        )
+    }
+}
+
+/// An owning handle of a child object that does not own itself.
 ///
 /// Use it for a child object with [`ForwardRefCount`]. The container holds the handle.
 /// The child is destroyed when the `Drop` of the container type drops the handle. This
 /// gives the destruction order of Direct3D 9: the container destroys its surfaces and
 /// volumes with itself.
 ///
-pub struct OwnedObject<T>
+/// The type derefs to `T`, so the Rust methods of the implementation are available
+/// without a call through the vtable.
+pub struct ChildObject<T>
 where
     T: ComImplement + RefCounted<Policy = ForwardRefCount>,
 {
@@ -256,7 +270,7 @@ where
     object: NonNull<ComObject<T>>,
 }
 
-impl<T> OwnedObject<T>
+impl<T> ChildObject<T>
 where
     T: ComImplement + RefCounted<Policy = ForwardRefCount>,
 {
@@ -270,14 +284,6 @@ where
             // SAFETY: `Box::into_raw` never gives a null pointer.
             object: unsafe { NonNull::new_unchecked(object.cast_mut()) },
         }
-    }
-
-    /// Give the Rust value.
-    #[inline]
-    #[must_use]
-    pub fn get(&self) -> &T {
-        // SAFETY: The handle owns a live object.
-        unsafe { self.object.as_ref() }.data()
     }
 
     /// Give the interface pointer of `I` without a change of a count.
@@ -313,18 +319,20 @@ where
     }
 }
 
-impl<T> core::ops::Deref for OwnedObject<T>
+impl<T> core::ops::Deref for ChildObject<T>
 where
     T: ComImplement + RefCounted<Policy = ForwardRefCount>,
 {
     type Target = T;
 
+    #[inline]
     fn deref(&self) -> &T {
-        self.get()
+        // SAFETY: The handle owns a live object.
+        unsafe { self.object.as_ref() }.data()
     }
 }
 
-impl<T> Drop for OwnedObject<T>
+impl<T> Drop for ChildObject<T>
 where
     T: ComImplement + RefCounted<Policy = ForwardRefCount>,
 {
@@ -334,15 +342,29 @@ where
     }
 }
 
+impl<T> fmt::Debug for ChildObject<T>
+where
+    T: ComImplement + RefCounted<Policy = ForwardRefCount>,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "ChildObject<{}>({:p})",
+            core::any::type_name::<T>(),
+            self.object.as_ptr()
+        )
+    }
+}
+
 // SAFETY: The handle is an owning pointer. It may move to another thread when the value
 // may move.
-unsafe impl<T> Send for OwnedObject<T> where
+unsafe impl<T> Send for ChildObject<T> where
     T: ComImplement + RefCounted<Policy = ForwardRefCount> + Send + Sync
 {
 }
 
 // SAFETY: A shared reference of the handle gives a shared reference of the value.
-unsafe impl<T> Sync for OwnedObject<T> where
+unsafe impl<T> Sync for ChildObject<T> where
     T: ComImplement + RefCounted<Policy = ForwardRefCount> + Send + Sync
 {
 }

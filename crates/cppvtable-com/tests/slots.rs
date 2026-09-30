@@ -7,7 +7,7 @@
 use core::ffi::c_void;
 use core::mem::{offset_of, size_of};
 
-use cppvtable_com::{ComObject, ComPtr, RefCounted, SingleRefCount, implement, interface};
+use cppvtable_com::{ComObject, ComPtr, implement, interface};
 
 /// An interface with holes in the slot numbers.
 #[interface(abi = com, iid = "51075001-0000-4000-8000-000000000001")]
@@ -30,13 +30,8 @@ pub unsafe trait ISparseChild {
 }
 
 /// The object.
-#[implement(ISparseChild)]
+#[implement(ISparseChild, refcount = single)]
 struct Sparse;
-
-// SAFETY: Hooks obey the reference-count contract and all returned pointers stay live.
-unsafe impl RefCounted for Sparse {
-    type Policy = SingleRefCount;
-}
 
 impl ISparseImpl for Sparse {
     fn First(&self) -> u32 {
@@ -116,11 +111,8 @@ fn a_c_caller_finds_each_method_at_its_own_slot_number() {
 #[test]
 fn the_interface_wrapper_reaches_the_same_methods() {
     let object: ComPtr<ISparseChild> = ComObject::new(Sparse);
-    // SAFETY: The object is alive.
-    unsafe {
-        assert_eq!(object.Second(), 20);
-        assert_eq!(object.First(), 1);
-        assert_eq!(object.Fourth(), 4);
-        assert_eq!(object.Fifth(), 5);
-    }
+    assert_eq!(object.Second(), 20);
+    assert_eq!(object.First(), 1);
+    assert_eq!(object.Fourth(), 4);
+    assert_eq!(object.Fifth(), 5);
 }

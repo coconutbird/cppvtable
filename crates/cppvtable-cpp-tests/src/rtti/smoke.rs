@@ -1,8 +1,8 @@
 //! RTTI-enabled Rust object dispatch and native runtime casts.
 
 use super::*;
-use cppvtable::rtti::{RttiClass, RttiError, RttiMetadata, RttiObject};
-use cppvtable::{Object, OwnedObject, implement, interface, vtable_of};
+use cppvtable::rtti::{DynamicCastRuntime, RttiClass, RttiError, RttiMetadata, RttiObject};
+use cppvtable::{Object, OwnedObject, implement, interface};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -45,25 +45,35 @@ impl Drop for RustObject {
     }
 }
 
-fn native_metadata(class: Class) -> [Option<RttiMetadata>; 2] {
+fn native_metadata(class: Class) -> [RttiMetadata; 2] {
     let native = create_native(class);
     // SAFETY: The factory constructs this exact complete class with static native
-    // RTTI. Capture its metadata while live; the compiler descriptors outlive it.
+    // RTTI, whose Root/Derived and Secondary chains match these declarations. Capture
+    // its metadata while live; the compiler descriptors outlive it.
     unsafe {
-        let primary = RttiMetadata::from_interface(ABI, native.root);
-        let secondary = RttiMetadata::from_interface(ABI, native.secondary);
+        let root = IDerived::from_raw(native.root).expect("factory allocation succeeded");
+        let side = ISecondary::from_raw(native.secondary).expect("factory allocation succeeded");
+        let primary = RttiMetadata::of(&*root);
+        let secondary = RttiMetadata::of(&*side);
         assert_eq!(primary.complete_object(native.root), native.complete);
         assert_eq!(secondary.complete_object(native.secondary), native.complete);
         assert_eq!(primary.type_info(), secondary.type_info());
         delete_native(native.complete, class);
-        [Some(primary), Some(secondary)]
+        [primary, secondary]
     }
 }
 
 fn witness_class() -> RttiClass<RustObject> {
+    let [primary, secondary] = native_metadata(Class::Witness);
     // SAFETY: Witness has exactly these two nonvirtual interface chains at matching
     // offsets. Native callers use virtual callbacks only and never delete the object.
-    unsafe { RttiClass::new(&native_metadata(Class::Witness)) }.unwrap()
+    unsafe {
+        RttiClass::builder()
+            .with::<IDerived>(primary)
+            .with::<ISecondary>(secondary)
+            .build()
+    }
+    .unwrap()
 }
 
 /// # Safety
@@ -105,10 +115,11 @@ fn native_rtti_and_rust_callbacks_survive_ownership_transfer() {
         (secondary as usize) - (primary as usize),
         Object::<RustObject>::slot_offset(1)
     );
+    let runtime = DynamicCastRuntime::TARGET;
     // SAFETY: All pointers and static source/target descriptors match this live object.
     unsafe {
         assert!(native_checks(primary, secondary, 70));
-        let info = RttiMetadata::from_interface(ABI, secondary);
+        let info = RttiMetadata::of(&*owner.interface::<ISecondary>());
         assert_eq!(info.type_info(), type_descriptor(Class::Witness));
         assert!(
             info.mangled_name()
@@ -118,7 +129,7 @@ fn native_rtti_and_rust_callbacks_survive_ownership_transfer() {
         );
         assert_eq!(info.complete_object(secondary), primary);
         assert_eq!(
-            runtime().cast(
+            runtime.cast(
                 primary,
                 type_descriptor(Class::Root),
                 type_descriptor(Class::Secondary)
@@ -126,7 +137,7 @@ fn native_rtti_and_rust_callbacks_survive_ownership_transfer() {
             secondary
         );
         assert_eq!(
-            runtime().cast(
+            runtime.cast(
                 secondary,
                 type_descriptor(Class::Secondary),
                 type_descriptor(Class::Witness)
@@ -134,7 +145,7 @@ fn native_rtti_and_rust_callbacks_survive_ownership_transfer() {
             primary
         );
         assert!(
-            runtime()
+            runtime
                 .cast(
                     primary,
                     type_descriptor(Class::Root),
@@ -143,7 +154,7 @@ fn native_rtti_and_rust_callbacks_survive_ownership_transfer() {
                 .is_null()
         );
         assert!(
-            runtime()
+            runtime
                 .cast(
                     core::ptr::null_mut(),
                     type_descriptor(Class::Root),
@@ -180,8 +191,8 @@ fn objects_of_one_class_share_its_rtti_tables() {
     });
     let tables = |owner: &OwnedObject<RustObject>| {
         (
-            vtable_of(&*owner.interface::<IDerived>()).cast::<c_void>(),
-            vtable_of(&*owner.interface::<ISecondary>()).cast::<c_void>(),
+            std::ptr::from_ref(owner.interface::<IDerived>().vtable()).cast::<c_void>(),
+            std::ptr::from_ref(owner.interface::<ISecondary>().vtable()).cast::<c_void>(),
         )
     };
     assert_eq!(tables(&first), tables(&second));
@@ -204,25 +215,29 @@ fn objects_of_one_class_share_its_rtti_tables() {
 
 #[test]
 fn checked_metadata_mismatches_are_rejected() {
-    let metadata = native_metadata(Class::Witness);
-    let other = native_metadata(Class::OtherWitness);
+    let [primary, secondary] = native_metadata(Class::Witness);
+    let [_, other_secondary] = native_metadata(Class::OtherWitness);
     // SAFETY: All native descriptors are valid. These structural mismatches are
-    // explicitly checked and allowed by RttiClass::new's error contract.
+    // explicitly checked and allowed by the builder's error contract.
     unsafe {
         assert!(matches!(
-            RttiClass::<RustObject>::new(&[]),
-            Err(RttiError::InterfaceCount)
-        ));
-        assert!(matches!(
-            RttiClass::<RustObject>::new(&[metadata[1], metadata[0]]),
+            RttiClass::<RustObject>::builder()
+                .with::<IDerived>(secondary)
+                .with::<ISecondary>(primary)
+                .build(),
             Err(RttiError::OffsetMismatch)
         ));
         assert!(matches!(
-            RttiClass::<RustObject>::new(&[metadata[0], other[1]]),
+            RttiClass::<RustObject>::builder()
+                .with::<IDerived>(primary)
+                .with::<ISecondary>(other_secondary)
+                .build(),
             Err(RttiError::TypeMismatch)
         ));
         assert!(matches!(
-            RttiClass::<RustObject>::new(&[None, metadata[1]]),
+            RttiClass::<RustObject>::builder()
+                .with::<ISecondary>(secondary)
+                .build(),
             Err(RttiError::InterfaceKind)
         ));
     }

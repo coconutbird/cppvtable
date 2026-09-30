@@ -20,7 +20,7 @@
 //!     let owner = OwnedObject::new(Value);
 //!     owner.interface::<IValue>()
 //! };
-//! unsafe { view.value(); }
+//! view.value();
 //! ```
 //!
 //! COM declarations use the separate crate:
@@ -108,9 +108,12 @@ pub mod hook;
 mod object;
 pub mod rtti;
 
-pub use cppvtable_abi::{Interface, VtableLayout, VtablePtr, raw_of, vtable_of};
-pub use cppvtable_macro::{implement_native as implement, interface_native as interface};
+#[doc(hidden)]
+pub use cppvtable_abi::interface::RawInterface;
+pub use cppvtable_abi::{Interface, InterfaceRef, VtableLayout, VtablePtr};
+pub use cppvtable_macro::{
+    implement_native as implement, interface_native as interface, vtable_fn,
+};
 pub use object::{
-    CppInterface, Implement, Implements, InterfaceDescriptor, InterfaceRef, Object, OwnedObject,
-    interface_of,
+    CppInterface, Implement, Implements, InterfaceDescriptor, Object, OwnedObject, interface_of,
 };

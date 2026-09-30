@@ -14,15 +14,15 @@ pub struct ForwardState;
 /// texture, and for the implicit surfaces of a swapchain. `AddRef` of the child changes
 /// the public count of the container and returns the new count of the container.
 ///
-/// The child has no counts of its own. The container owns the child with an
-/// [`crate::OwnedObject`] handle and destroys it with itself.
+/// The child has no counts of its own. The container owns the child with a
+/// [`crate::ChildObject`] handle and destroys it with itself.
 ///
 /// [`RefCounted::container`] gives the interface pointer of the container. Returning
 /// `None` violates the policy contract and causes reference-count operations to panic.
 #[derive(Debug)]
 pub struct ForwardRefCount;
 
-// SAFETY: The policy never destroys the object. The owner of the `OwnedObject` handle
+// SAFETY: The policy never destroys the object. The owner of the `ChildObject` handle
 // destroys it exactly one time.
 unsafe impl RefCountPolicy for ForwardRefCount {
     type State = ForwardState;

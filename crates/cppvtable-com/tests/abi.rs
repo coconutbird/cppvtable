@@ -9,9 +9,7 @@
 use core::mem::{offset_of, size_of};
 use core::sync::atomic::{AtomicI32, Ordering};
 
-use cppvtable_com::{
-    ComObject, ComPtr, HRESULT, RefCounted, S_OK, SingleRefCount, implement, interface,
-};
+use cppvtable_com::{ComObject, ComPtr, HRESULT, S_OK, implement, interface};
 
 /// A three-element vector. MSVC gives it back through a hidden pointer.
 #[repr(C)]
@@ -66,7 +64,7 @@ pub unsafe trait IGeometry {
 }
 
 /// An object with a COM geometry interface.
-#[implement(IGeometry)]
+#[implement(IGeometry, refcount = single)]
 struct Shape {
     /// The first element of the origin.
     x: AtomicI32,
@@ -74,11 +72,6 @@ struct Shape {
     y: AtomicI32,
     /// The third element of the origin.
     z: AtomicI32,
-}
-
-// SAFETY: Hooks obey the reference-count contract and all returned pointers stay live.
-unsafe impl RefCounted for Shape {
-    type Policy = SingleRefCount;
 }
 
 impl IGeometryImpl for Shape {
@@ -171,14 +164,11 @@ fn a_hidden_return_shim_writes_to_the_hidden_pointer_and_gives_it_back() {
     assert_eq!(scaled, Vector3 { x: 3, y: 6, z: 9 });
 
     // The interface wrapper hides the pointer.
-    // SAFETY: The object is alive.
-    unsafe {
-        assert_eq!(shape.GetOrigin(), Vector3 { x: 1, y: 2, z: 3 });
-        assert_eq!(shape.GetScaled(2), Vector3 { x: 2, y: 4, z: 6 });
-        assert_eq!(shape.GetTag(), Tag(0xfeed_0001));
-        assert!(shape.SetOrigin(7, 8, 9).is_ok());
-        assert_eq!(shape.GetOrigin(), Vector3 { x: 7, y: 8, z: 9 });
-    }
+    assert_eq!(shape.GetOrigin(), Vector3 { x: 1, y: 2, z: 3 });
+    assert_eq!(shape.GetScaled(2), Vector3 { x: 2, y: 4, z: 6 });
+    assert_eq!(shape.GetTag(), Tag(0xfeed_0001));
+    assert!(shape.SetOrigin(7, 8, 9).is_ok());
+    assert_eq!(shape.GetOrigin(), Vector3 { x: 7, y: 8, z: 9 });
 }
 
 #[test]

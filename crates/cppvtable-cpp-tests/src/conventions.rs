@@ -3,7 +3,6 @@
 use cppvtable::{OwnedObject, implement, interface};
 use std::ffi::c_void;
 
-#[cfg(all(target_arch = "x86", target_os = "windows"))]
 #[interface(abi = c)]
 unsafe trait IConventions {
     #[abi(convention = "cdecl")]
@@ -11,17 +10,6 @@ unsafe trait IConventions {
     #[abi(convention = "stdcall")]
     fn system_call(&self, value: i32) -> i32;
     #[abi(convention = "fastcall")]
-    fn fast_call(&self, value: i32) -> i32;
-}
-
-#[cfg(not(all(target_arch = "x86", target_os = "windows")))]
-#[interface(abi = c)]
-unsafe trait IConventions {
-    #[abi(convention = "C")]
-    fn plain(&self, value: i32) -> i32;
-    #[abi(convention = "system")]
-    fn system_call(&self, value: i32) -> i32;
-    #[abi(convention = "C")]
     fn fast_call(&self, value: i32) -> i32;
 }
 
@@ -76,15 +64,16 @@ unsafe extern "C" {
 #[test]
 fn rust_calls_c_per_function_conventions() {
     // SAFETY: C allocates the matching object and it lives through all calls.
-    unsafe {
-        let raw = cppvtable_c_conventions_create(10);
-        assert!(!raw.is_null());
-        let interface = IConventions::from_raw_ref(&raw);
+    let raw = unsafe { cppvtable_c_conventions_create(10) };
+    {
+        // SAFETY: The C object lives until the delete below, after the last borrow.
+        let interface = unsafe { IConventions::from_raw(raw) }.expect("C allocation succeeded");
         assert_eq!(interface.plain(7), 17);
         assert_eq!(interface.system_call(7), 24);
         assert_eq!(interface.fast_call(7), 31);
-        cppvtable_c_delete(raw);
     }
+    // SAFETY: The C allocation is deleted once, after its last borrow.
+    unsafe { cppvtable_c_delete(raw) };
 }
 
 #[test]
@@ -114,13 +103,15 @@ fn rust_calls_known_entry_in_native_partial_table() {
         32 * std::mem::size_of::<usize>()
     );
     // SAFETY: C allocates the 50-entry table, with the matching known function at entry 32.
-    unsafe {
-        let raw = cppvtable_c_partial_create(10);
-        assert!(!raw.is_null());
-        assert_eq!(IPartial::from_raw_ref(&raw).known(7), 17);
-        assert_eq!(IPartialPrefix::from_raw_ref(&raw).known(7), 17);
-        cppvtable_c_delete(raw);
-    }
+    let raw = unsafe { cppvtable_c_partial_create(10) };
+    // SAFETY: The C object lives until the delete below, after the last borrow.
+    let full = unsafe { IPartial::from_raw(raw) }.expect("C allocation succeeded");
+    assert_eq!(full.known(7), 17);
+    // SAFETY: A prefix view of the same live table.
+    let prefix = unsafe { IPartialPrefix::from_raw(raw) }.expect("C allocation succeeded");
+    assert_eq!(prefix.known(7), 17);
+    // SAFETY: The C allocation is deleted once, after its last borrow.
+    unsafe { cppvtable_c_delete(raw) };
 }
 
 #[test]

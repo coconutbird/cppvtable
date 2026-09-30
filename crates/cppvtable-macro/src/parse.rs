@@ -121,18 +121,7 @@ impl InterfaceArgs {
         for item in &items {
             match item {
                 Meta::NameValue(pair) if pair.path.is_ident("abi") => {
-                    let name = path_expr_name(&pair.value).ok_or_else(|| {
-                        syn::Error::new(
-                            pair.value.span(),
-                            "abi: give `com`, `cpp`, `msvc`, `itanium`, or `c`",
-                        )
-                    })?;
-                    abi = Some(Abi::from_name(&name).ok_or_else(|| {
-                        syn::Error::new(
-                            pair.value.span(),
-                            format!("abi: `{name}` is unknown. Give `com`, `cpp`, `msvc`, `itanium`, or `c`."),
-                        )
-                    })?);
+                    abi = Some(parse_abi(&pair.value)?);
                 }
                 Meta::NameValue(pair) if pair.path.is_ident("layout") => {
                     if layout.is_some() {
@@ -244,6 +233,12 @@ pub(crate) struct Method {
     pub(crate) name: Ident,
     /// The documentation of the declaration.
     pub(crate) docs: Vec<Attribute>,
+    /// `deprecated`, `must_use`, `allow`, and `expect`, forwarded to the caller and the
+    /// implementation method.
+    pub(crate) attrs: Vec<Attribute>,
+    /// The method carries a deprecation, so the generated shim must not warn when it
+    /// calls the implementation.
+    pub(crate) deprecated: bool,
     /// Declared Rust call contract, preserved on the implementation trait method.
     pub(crate) unsafety: Option<Token![unsafe]>,
     /// The arguments after `&self`.
@@ -272,6 +267,17 @@ pub(crate) struct InterfaceModel {
     pub(crate) name: Ident,
     /// The documentation of the declaration.
     pub(crate) docs: Vec<Attribute>,
+    /// The other outer attributes, forwarded to the interface type.
+    pub(crate) attrs: Vec<Attribute>,
+    /// The `#[cfg]` attributes of the declaration, applied to every generated item.
+    ///
+    /// A `#[cfg]` before `#[interface]` is normally evaluated and removed first, but
+    /// older compilers still pass the true predicate to the macro, and one written
+    /// after `#[interface]` always arrives unevaluated.
+    pub(crate) cfgs: Vec<Attribute>,
+    /// The interface type carries a deprecation, so the generated items that name it
+    /// must not warn.
+    pub(crate) deprecated: bool,
     /// The entries of the derived part of the vtable, in slot order.
     pub(crate) slots: Vec<Slot>,
 }
@@ -285,12 +291,22 @@ impl InterfaceModel {
                 "an interface must not have generic parameters",
             ));
         }
+        if item.unsafety.is_none() {
+            return Err(syn::Error::new(
+                item.trait_token.span(),
+                "declare the interface as an `unsafe trait`. The `unsafe` promises that the \
+                 slot order, signatures, calling conventions, and return lowering match the \
+                 foreign header, that every method declared as a safe `fn` has no \
+                 precondition beyond a live object, and that no method unwinds.",
+            ));
+        }
         if !item.supertraits.is_empty() {
             return Err(syn::Error::new(
                 item.supertraits.span(),
                 "use `extends(IBase)` in `#[interface]`, not a supertrait",
             ));
         }
+        let (attrs, cfgs) = forwarded_trait_attributes(&item.attrs)?;
 
         let mut slots: Vec<Slot> = Vec::new();
         let mut next = 0_usize;
@@ -334,26 +350,15 @@ impl InterfaceModel {
             };
             next = index + 1;
 
-            let mut params = Vec::new();
-            for (position, argument) in function.sig.inputs.iter().enumerate() {
-                let FnArg::Typed(typed) = argument else {
-                    continue;
-                };
-                let name = match typed.pat.as_ref() {
-                    Pat::Ident(ident) => ident.ident.clone(),
-                    _ => format_ident!("arg{}", position, span = typed.pat.span()),
-                };
-                params.push(Param {
-                    name,
-                    ty: (*typed.ty).clone(),
-                });
-            }
+            let params = method_params(&function.sig);
 
             slots.push(Slot {
                 index,
                 method: Some(Method {
                     name: function.sig.ident.clone(),
                     docs: doc_attributes(&function.attrs),
+                    deprecated: options.forwarded.iter().any(is_deprecation),
+                    attrs: options.forwarded,
                     unsafety: match &function.sig.safety {
                         syn::Safety::Unsafe(token) => Some(*token),
                         _ => None,
@@ -370,6 +375,9 @@ impl InterfaceModel {
             vis: item.vis.clone(),
             name: item.ident.clone(),
             docs: doc_attributes(&item.attrs),
+            deprecated: attrs.iter().any(is_deprecation),
+            attrs,
+            cfgs,
             slots,
         })
     }
@@ -381,6 +389,14 @@ impl InterfaceModel {
             .filter_map(|slot| slot.method.as_ref())
             .map(|method| method.name.to_string())
             .collect()
+    }
+
+    /// Tell if a method overrides its convention with one that exists only on x86.
+    pub(crate) fn uses_x86_conventions(&self) -> bool {
+        self.slots
+            .iter()
+            .filter_map(|slot| slot.method.as_ref()?.convention.as_ref())
+            .any(|convention| crate::abi::is_x86_only(&convention.value()))
     }
 }
 
@@ -396,6 +412,8 @@ struct MethodOptions {
     aggregate: bool,
     /// Explicit calling convention override.
     convention: Option<syn::LitStr>,
+    /// Attributes forwarded to the caller and the implementation method.
+    forwarded: Vec<Attribute>,
 }
 
 impl MethodOptions {
@@ -433,22 +451,7 @@ impl MethodOptions {
             Meta::Path(path) if path.is_ident("hidden_return") => self.hidden_return = true,
             Meta::Path(path) if path.is_ident("aggregate") => self.aggregate = true,
             Meta::NameValue(pair) if pair.path.is_ident("convention") => {
-                let Expr::Lit(ExprLit {
-                    lit: Lit::Str(text),
-                    ..
-                }) = pair.value
-                else {
-                    return Err(syn::Error::new(
-                        pair.span(),
-                        "convention requires a string literal",
-                    ));
-                };
-                if !CONVENTIONS.contains(&text.value().as_str()) {
-                    return Err(syn::Error::new(
-                        text.span(),
-                        "unsupported convention; use C, system, cdecl, stdcall, fastcall, thiscall, win64, sysv64, or aapcs",
-                    ));
-                }
+                let text = parse_convention(&pair.value)?;
                 if self.convention.is_some() {
                     return Err(syn::Error::new(
                         text.span(),
@@ -475,6 +478,7 @@ impl MethodOptions {
             hidden_return: false,
             aggregate: false,
             convention: None,
+            forwarded: Vec::new(),
         };
         for attr in attrs {
             if attr.path().is_ident("doc") {
@@ -493,14 +497,129 @@ impl MethodOptions {
                 }
                 continue;
             }
+            if FORWARDED_METHOD_ATTRIBUTES
+                .iter()
+                .any(|name| attr.path().is_ident(name))
+            {
+                options.forwarded.push(attr.clone());
+                continue;
+            }
+            if attr.path().is_ident("cfg") || attr.path().is_ident("cfg_attr") {
+                return Err(syn::Error::new(
+                    attr.span(),
+                    "a method of an interface cannot be configured out: removing it would \
+                     shift the slots of every later method. Declare one interface for each \
+                     configuration instead.",
+                ));
+            }
             return Err(syn::Error::new(
                 attr.span(),
-                "a method of an interface takes `#[slot(N)]`, `#[abi(...)]`, and \
+                "a method of an interface takes `#[slot(N)]`, `#[abi(...)]`, \
+                 `#[deprecated]`, `#[must_use]`, `#[allow(...)]`, `#[expect(...)]`, and \
                  documentation only",
             ));
         }
         Ok(options)
     }
+}
+
+/// The method attributes forwarded to both the caller and the implementation method.
+const FORWARDED_METHOD_ATTRIBUTES: &[&str] = &["deprecated", "must_use", "allow", "expect"];
+
+/// Read a calling-convention override.
+fn parse_convention(value: &Expr) -> Result<syn::LitStr, syn::Error> {
+    let Expr::Lit(ExprLit {
+        lit: Lit::Str(text),
+        ..
+    }) = value
+    else {
+        return Err(syn::Error::new(
+            value.span(),
+            "convention requires a string literal",
+        ));
+    };
+    if !CONVENTIONS.contains(&text.value().as_str()) {
+        return Err(syn::Error::new(
+            text.span(),
+            "unsupported convention; use C, system, cdecl, stdcall, fastcall, thiscall, win64, sysv64, or aapcs",
+        ));
+    }
+    Ok(text.clone())
+}
+
+/// Read the `abi` argument of a macro.
+fn parse_abi(value: &Expr) -> Result<Abi, syn::Error> {
+    let name = path_expr_name(value).ok_or_else(|| {
+        syn::Error::new(
+            value.span(),
+            "abi: give `com`, `cpp`, `msvc`, `itanium`, or `c`",
+        )
+    })?;
+    Abi::from_name(&name).ok_or_else(|| {
+        syn::Error::new(
+            value.span(),
+            format!("abi: `{name}` is unknown. Give `com`, `cpp`, `msvc`, `itanium`, or `c`."),
+        )
+    })
+}
+
+/// Split the outer attributes of an interface declaration into those that go to the
+/// interface type and the `#[cfg]` attributes that go to every generated item.
+///
+/// Documentation is handled separately. Attributes that would break the generated type
+/// are rejected.
+fn forwarded_trait_attributes(
+    attrs: &[Attribute],
+) -> Result<(Vec<Attribute>, Vec<Attribute>), syn::Error> {
+    let mut forwarded = Vec::new();
+    let mut cfgs = Vec::new();
+    for attr in attrs {
+        let path = attr.path();
+        if path.is_ident("doc") {
+            continue;
+        }
+        if path.is_ident("cfg") {
+            cfgs.push(attr.clone());
+            continue;
+        }
+        let message = if path.is_ident("derive") {
+            "an interface type cannot derive traits. It is never constructed or copied, and \
+             it already implements `Debug`, `PartialEq`, and `Eq`."
+        } else if path.is_ident("repr") {
+            "an interface type is always `#[repr(transparent)]`"
+        } else {
+            forwarded.push(attr.clone());
+            continue;
+        };
+        return Err(syn::Error::new(attr.span(), message));
+    }
+    Ok((forwarded, cfgs))
+}
+
+/// Tell if an attribute deprecates its item, possibly under `cfg_attr`.
+pub(crate) fn is_deprecation(attr: &Attribute) -> bool {
+    let path = attr.path();
+    path.is_ident("deprecated")
+        || (path.is_ident("cfg_attr")
+            && mentions_ident(quote::ToTokens::to_token_stream(&attr.meta), "deprecated"))
+}
+
+/// Tell if a token stream holds an identifier, at any depth.
+fn mentions_ident(tokens: TokenStream, name: &str) -> bool {
+    tokens.into_iter().any(|token| match token {
+        proc_macro2::TokenTree::Ident(ident) => ident == name,
+        proc_macro2::TokenTree::Group(group) => mentions_ident(group.stream(), name),
+        proc_macro2::TokenTree::Punct(_) | proc_macro2::TokenTree::Literal(_) => false,
+    })
+}
+
+/// The reference-count policy that `#[implement(..., refcount = ...)]` writes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum RefCount {
+    /// `SingleRefCount`.
+    Single,
+    /// `DualRefCount`.
+    Dual,
 }
 
 /// The arguments of `#[implement(...)]`.
@@ -509,20 +628,48 @@ pub(crate) struct ImplementArgs {
     pub(crate) interfaces: Vec<Path>,
     /// The declaration is inside `cppvtable-com`.
     pub(crate) internal: bool,
+    /// The COM reference-count policy to implement, if any.
+    pub(crate) refcount: Option<RefCount>,
 }
 
 impl ImplementArgs {
     /// Read the arguments.
     pub(crate) fn parse(tokens: TokenStream) -> Result<Self, syn::Error> {
         let span = tokens.span();
-        let items = Punctuated::<Path, Token![,]>::parse_terminated.parse2(tokens)?;
+        let items = Punctuated::<Meta, Token![,]>::parse_terminated.parse2(tokens)?;
         let mut interfaces = Vec::new();
         let mut internal = false;
-        for path in items {
-            if path.is_ident("internal") {
-                internal = true;
-            } else {
-                interfaces.push(path);
+        let mut refcount = None;
+        for item in items {
+            match item {
+                Meta::Path(path) if path.is_ident("internal") => internal = true,
+                Meta::Path(path) => interfaces.push(path),
+                Meta::NameValue(pair) if pair.path.is_ident("refcount") => {
+                    if refcount.is_some() {
+                        return Err(syn::Error::new(
+                            pair.span(),
+                            "refcount may be specified only once",
+                        ));
+                    }
+                    refcount = Some(match path_expr_name(&pair.value).as_deref() {
+                        Some("single") => RefCount::Single,
+                        Some("dual") => RefCount::Dual,
+                        _ => {
+                            return Err(syn::Error::new(
+                                pair.value.span(),
+                                "refcount: use `single` or `dual`. Write `unsafe impl \
+                                 RefCounted` by hand for `ForwardRefCount` or custom hooks.",
+                            ));
+                        }
+                    });
+                }
+                other => {
+                    return Err(syn::Error::new(
+                        other.span(),
+                        "unknown argument. Give interface paths, `refcount = single|dual`, \
+                         or `internal`.",
+                    ));
+                }
             }
         }
         if interfaces.is_empty() {
@@ -534,6 +681,7 @@ impl ImplementArgs {
         Ok(Self {
             interfaces,
             internal,
+            refcount,
         })
     }
 
@@ -560,12 +708,78 @@ impl ImplementArgs {
     }
 }
 
+/// The arguments of `#[vtable_fn(...)]`.
+pub(crate) struct VtableFnArgs {
+    /// The binary interface whose vtable fields the function must match.
+    pub(crate) abi: Abi,
+    /// The per-method convention override that the matching vtable field uses.
+    pub(crate) convention: Option<syn::LitStr>,
+}
+
+impl VtableFnArgs {
+    /// Read the arguments.
+    pub(crate) fn parse(tokens: TokenStream) -> Result<Self, syn::Error> {
+        let span = tokens.span();
+        let items = Punctuated::<Meta, Token![,]>::parse_terminated.parse2(tokens)?;
+        let mut abi = None;
+        let mut convention = None;
+        for item in &items {
+            match item {
+                Meta::NameValue(pair) if pair.path.is_ident("abi") && abi.is_none() => {
+                    abi = Some(parse_abi(&pair.value)?);
+                }
+                Meta::NameValue(pair)
+                    if pair.path.is_ident("convention") && convention.is_none() =>
+                {
+                    convention = Some(parse_convention(&pair.value)?);
+                }
+                other => {
+                    return Err(syn::Error::new(
+                        other.span(),
+                        "give `abi = cpp|c|msvc|itanium|com` once, and optionally the \
+                         `convention = \"...\"` override of the method once",
+                    ));
+                }
+            }
+        }
+        let abi = abi.ok_or_else(|| {
+            syn::Error::new(
+                span,
+                "give the binary interface: `abi = cpp`, `c`, `msvc`, `itanium`, or `com`",
+            )
+        })?;
+        Ok(Self { abi, convention })
+    }
+}
+
 /// Keep the documentation attributes only.
 fn doc_attributes(attrs: &[Attribute]) -> Vec<Attribute> {
     attrs
         .iter()
         .filter(|attr| attr.path().is_ident("doc"))
         .cloned()
+        .collect()
+}
+
+/// Read the arguments after `&self`. A pattern that is not a name becomes `argN`.
+fn method_params(signature: &syn::Signature) -> Vec<Param> {
+    signature
+        .inputs
+        .iter()
+        .enumerate()
+        .filter_map(|(position, argument)| {
+            let FnArg::Typed(typed) = argument else {
+                return None;
+            };
+            let name = match typed.pat.as_ref() {
+                Pat::Ident(ident) => ident.ident.clone(),
+                _ => format_ident!("arg{}", position, span = typed.pat.span()),
+            };
+            Some(Param {
+                name,
+                ty: (*typed.ty).clone(),
+            })
+        })
         .collect()
 }
 

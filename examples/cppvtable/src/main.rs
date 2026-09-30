@@ -93,13 +93,10 @@ fn main() {
     println!("--- Rust calling a C++ implementation ---");
     let cpp_dog = create_cpp_dog("Max");
     let _ = io::stdout().flush();
-    // SAFETY: `cpp_dog` is a live pointer to the matching C++ `IAnimal` vtable.
-    let cpp_dog_ref = unsafe { IAnimal::from_raw_ref(&cpp_dog) };
-    // SAFETY: The C++ object is alive and its virtual methods obey this interface.
-    let cpp_legs = unsafe {
-        cpp_dog_ref.speak();
-        cpp_dog_ref.legs()
-    };
+    // SAFETY: `cpp_dog` points at a live C++ `IAnimal`, which outlives this borrow.
+    let animal = unsafe { IAnimal::from_raw(cpp_dog) }.expect("C++ allocation failed");
+    animal.speak();
+    let cpp_legs = animal.legs();
     println!("Rust sees the C++ dog's legs: {cpp_legs}");
     // SAFETY: This pointer came from `create_cpp_dog` and has not been deleted yet.
     unsafe { delete_cpp_dog(cpp_dog) };

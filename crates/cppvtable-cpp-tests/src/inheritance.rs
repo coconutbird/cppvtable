@@ -97,12 +97,13 @@ unsafe fn cpp_scaled(object: *mut c_void, factor: i32) -> i32 {
 #[test]
 fn rust_calls_cpp_inherited_and_explicit_interfaces() {
     let raw = create_derived(11);
-    // SAFETY: All declarations have identical slots to C++ IDerived and it stays alive.
-    unsafe {
-        let derived = IDerived::from_raw_ref(&raw);
+    {
+        // SAFETY: Both declarations have identical slots to C++ IDerived, which outlives the borrows.
+        let derived = unsafe { IDerived::from_raw(raw) }.expect("factory allocation succeeded");
         assert_eq!(derived.value(), 11);
         assert_eq!(derived.scaled(3), 33);
-        let explicit = IExplicit::from_raw_ref(&raw);
+        // SAFETY: As above.
+        let explicit = unsafe { IExplicit::from_raw(raw) }.expect("factory allocation succeeded");
         assert_eq!(explicit.value(), 11);
         assert_eq!(explicit.scaled(3), 33);
     }
@@ -120,8 +121,7 @@ fn cpp_calls_rust_inherited_and_explicit_interfaces() {
         assert_eq!(cpp_value(owner.as_raw::<IExplicit>()), 11);
         assert_eq!(cpp_scaled(owner.as_raw::<IExplicit>(), 3), 33);
     }
-    let base = owner.query_interface::<IBase>().expect("inherited base");
+    let base = owner.try_interface::<IBase>().expect("inherited base");
     assert_eq!(base.as_raw(), owner.as_raw::<IDerived>());
-    // SAFETY: The owner's interface remains alive.
-    assert_eq!(unsafe { base.value() }, 11);
+    assert_eq!(base.value(), 11);
 }

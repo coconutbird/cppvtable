@@ -6,35 +6,35 @@ use cppvtable::{Object, OwnedObject};
 /// Test Rust can call a C++ multi-inheritance object through its primary interface.
 #[test]
 fn test_cpp_multi_inheritance_primary_interface() {
-    unsafe {
-        let cpp_duck = create_cpp_duck(10);
-        let swimmer_ptr = cpp_duck_as_swimmer(cpp_duck);
+    let cpp_duck = create_cpp_duck(10);
+    // SAFETY: `cpp_duck` is a live CppDuck.
+    let swimmer_ptr = unsafe { cpp_duck_as_swimmer(cpp_duck) };
 
-        {
-            // SAFETY: The C++ object stays alive through the borrowed interface call.
-            let swimmer = IForeignSwimmer::from_raw_ref(&swimmer_ptr);
-            assert_eq!(swimmer.swim_speed(), 10);
-        }
-
-        delete_cpp_duck(cpp_duck);
+    {
+        // SAFETY: The C++ object stays alive through the borrowed interface call.
+        let swimmer = unsafe { IForeignSwimmer::from_raw(swimmer_ptr) }.unwrap();
+        assert_eq!(swimmer.swim_speed(), 10);
     }
+
+    // SAFETY: The factory allocation is deleted once, after its last borrow.
+    unsafe { delete_cpp_duck(cpp_duck) };
 }
 
 /// Test Rust can call a C++ multi-inheritance object through its secondary interface.
 #[test]
 fn test_cpp_multi_inheritance_secondary_interface() {
-    unsafe {
-        let cpp_duck = create_cpp_duck(10);
-        let flyer_ptr = cpp_duck_as_flyer(cpp_duck);
+    let cpp_duck = create_cpp_duck(10);
+    // SAFETY: `cpp_duck` is a live CppDuck.
+    let flyer_ptr = unsafe { cpp_duck_as_flyer(cpp_duck) };
 
-        {
-            // SAFETY: The C++ object stays alive through the borrowed interface call.
-            let flyer = IForeignFlyer::from_raw_ref(&flyer_ptr);
-            assert_eq!(flyer.fly_speed(), 20);
-        }
-
-        delete_cpp_duck(cpp_duck);
+    {
+        // SAFETY: The C++ object stays alive through the borrowed interface call.
+        let flyer = unsafe { IForeignFlyer::from_raw(flyer_ptr) }.unwrap();
+        assert_eq!(flyer.fly_speed(), 20);
     }
+
+    // SAFETY: The factory allocation is deleted once, after its last borrow.
+    unsafe { delete_cpp_duck(cpp_duck) };
 }
 
 /// Test C++ can call a Rust multi-inheritance object through its primary interface.

@@ -12,7 +12,7 @@ workspace = true
 
 [dependencies]
 cpp = { workspace = true }
-cppvtable.workspace = true
+cppvtable = { workspace = true, features = ["native-dynamic-cast"] }
 cppvtable-abi.workspace = true
 cppvtable-com.workspace = true
 

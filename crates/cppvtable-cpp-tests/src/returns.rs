@@ -198,9 +198,9 @@ unsafe fn cpp_indirect_from(object: *mut c_void, value: *const i64) -> Large {
 #[test]
 fn rust_calls_cpp_return_abis() {
     let raw = create_cpp_returns(40);
-    // SAFETY: The C++ object lives through every borrowed virtual call.
-    unsafe {
-        let interface = IReturns::from_raw_ref(&raw);
+    {
+        // SAFETY: The C++ object lives through every borrowed virtual call.
+        let interface = unsafe { IReturns::from_raw(raw) }.expect("factory allocation succeeded");
         assert_eq!(interface.small(9), Small { x: 9, y: 16 });
         assert_eq!(interface.large(2), Large { x: 2, y: 40, z: 42 });
         assert_eq!(interface.floating(3.25).to_bits(), 3.75_f64.to_bits());
@@ -210,11 +210,13 @@ fn rust_calls_cpp_return_abis() {
         let small_input = 9;
         let large_input = 2;
         assert_eq!(
-            interface.small_from(&raw const small_input),
+            // SAFETY: `small_input` is an initialized local.
+            unsafe { interface.small_from(&raw const small_input) },
             Small { x: 9, y: 16 }
         );
         assert_eq!(
-            interface.indirect_from(&raw const large_input),
+            // SAFETY: `large_input` is an initialized local.
+            unsafe { interface.indirect_from(&raw const large_input) },
             Large { x: 2, y: 40, z: 42 }
         );
     }

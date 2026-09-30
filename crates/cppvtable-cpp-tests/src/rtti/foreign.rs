@@ -1,12 +1,12 @@
 //! Native inheritance access rules and leaf/single-inheritance RTTI kinds.
 
 use super::*;
-use cppvtable::rtti::{RttiClass, RttiMetadata, RttiObject};
+use cppvtable::rtti::{CppAbi, DynamicCastRuntime, RttiClass, RttiMetadata, RttiObject};
 use cppvtable::{implement, interface};
 
 #[test]
 fn foreign_virtual_ambiguous_and_private_bases_follow_native_cast_rules() {
-    let runtime = runtime();
+    let runtime = DynamicCastRuntime::TARGET;
     for class in [
         Class::VirtualWitness,
         Class::AmbiguousWitness,
@@ -16,8 +16,8 @@ fn foreign_virtual_ambiguous_and_private_bases_follow_native_cast_rules() {
         // SAFETY: The exact factory class is fully constructed and remains alive;
         // its compiler-produced hierarchy and native runtime match these descriptors.
         unsafe {
-            let root = RttiMetadata::from_interface(ABI, native.root);
-            let side = RttiMetadata::from_interface(ABI, native.secondary);
+            let root = RttiMetadata::from_interface(CppAbi::TARGET, native.root);
+            let side = RttiMetadata::from_interface(CppAbi::TARGET, native.secondary);
             assert_eq!(root.type_info(), type_descriptor(class));
             assert_eq!(side.type_info(), root.type_info());
             assert_eq!(root.complete_object(native.root), native.complete);
@@ -116,9 +116,13 @@ impl ISingleImpl for Single {
 
 fn metadata_for(class: Class) -> RttiMetadata {
     let native = create_native(class);
-    // SAFETY: Capture static native descriptors before releasing the concrete instance.
+    // SAFETY: Leaf and Single both start with the Leaf chain declared by `ILeaf`.
+    // Capture static native descriptors before releasing the concrete instance.
     unsafe {
-        let metadata = RttiMetadata::from_interface(ABI, native.root);
+        let metadata = {
+            let leaf = ILeaf::from_raw(native.root).expect("factory allocation succeeded");
+            RttiMetadata::of(&*leaf)
+        };
         delete_native(native.complete, class);
         metadata
     }
@@ -148,8 +152,14 @@ fn leaf_and_single_inheritance_type_descriptors_work_for_rust_objects() {
     // offset zero. Callbacks remain virtual and the native metadata stays loaded.
     let (leaf_class, single_class) = unsafe {
         (
-            RttiClass::<Leaf>::new(&[Some(leaf_metadata)]).unwrap(),
-            RttiClass::<Single>::new(&[Some(single_metadata)]).unwrap(),
+            RttiClass::<Leaf>::builder()
+                .with::<ILeaf>(leaf_metadata)
+                .build()
+                .unwrap(),
+            RttiClass::<Single>::builder()
+                .with::<ISingle>(single_metadata)
+                .build()
+                .unwrap(),
         )
     };
     let leaf = RttiObject::new(Leaf { value: 101 }, &leaf_class);

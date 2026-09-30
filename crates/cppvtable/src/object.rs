@@ -1,14 +1,14 @@
 //! Stable C/C++ object allocations without reference counting.
 
 use alloc::boxed::Box;
-use core::any::TypeId;
+use core::any::{TypeId, type_name};
 use core::ffi::c_void;
-use core::marker::PhantomData;
+use core::fmt;
 use core::mem::offset_of;
 use core::ops::Deref;
 use core::ptr::NonNull;
 
-use crate::{Interface, VtablePtr};
+use crate::{Interface, InterfaceRef, VtablePtr};
 
 /// Physical interface properties used when attaching C++ RTTI to an object.
 #[derive(Clone, Copy, Debug)]
@@ -98,16 +98,6 @@ pub struct Object<T: Implement> {
 }
 
 impl<T: Implement> Object<T> {
-    /// Allocate an object with a stable address and return its owning handle.
-    #[must_use]
-    #[expect(
-        clippy::new_ret_no_self,
-        reason = "A foreign object needs a stable owning allocation."
-    )]
-    pub fn new(value: T) -> OwnedObject<T> {
-        OwnedObject::new(value)
-    }
-
     /// Borrow the implementation value.
     #[must_use]
     pub fn data(&self) -> &T {
@@ -190,32 +180,9 @@ impl<T: Implement> Object<T> {
     }
 }
 
-/// An interface value tied to the lifetime of its owning object.
-///
-/// Dereference to call interface methods. Unlike a raw pointer, this borrow prevents
-/// the owning handle from being dropped while the interface is used.
-pub struct InterfaceRef<'a, I: CppInterface> {
-    interface: I,
-    lifetime: PhantomData<&'a c_void>,
-}
-
-impl<I: CppInterface> Deref for InterfaceRef<'_, I> {
-    type Target = I;
-
-    fn deref(&self) -> &I {
-        &self.interface
-    }
-}
-
-impl<I: CppInterface> InterfaceRef<'_, I> {
-    /// Get the borrowed interface pointer.
-    #[must_use]
-    pub fn as_raw(&self) -> *mut c_void {
-        crate::raw_of(&self.interface)
-    }
-}
-
 /// Sole ownership of a stable C/C++ object allocation.
+///
+/// Dereferences to the implementation value.
 ///
 /// The object is destroyed once when this handle is dropped. Foreign code may borrow
 /// its raw interfaces while the handle is alive; lifetime and thread rules for those
@@ -240,12 +207,6 @@ impl<T: Implement> OwnedObject<T> {
         }
     }
 
-    /// Borrow the Rust implementation value.
-    #[must_use]
-    pub fn get(&self) -> &T {
-        unsafe { self.object.as_ref() }.data()
-    }
-
     /// Borrow a directly implemented interface.
     #[must_use]
     pub fn interface<I: CppInterface>(&self) -> InterfaceRef<'_, I>
@@ -255,11 +216,12 @@ impl<T: Implement> OwnedObject<T> {
         self.borrow_slot(<T as Implements<I>>::SLOT)
     }
 
-    /// Borrow an implemented interface or a prefix-compatible base interface.
+    /// Borrow an implemented interface or a prefix-compatible base interface, or
+    /// `None` if `T` implements neither.
     ///
-    /// Lookup uses Rust type identity and never requires an interface identifier.
+    /// Lookup uses Rust type identity; it is not COM `QueryInterface`.
     #[must_use]
-    pub fn query_interface<I: CppInterface>(&self) -> Option<InterfaceRef<'_, I>> {
+    pub fn try_interface<I: CppInterface>(&self) -> Option<InterfaceRef<'_, I>> {
         T::slot_for_type(TypeId::of::<I>()).map(|slot| self.borrow_slot(slot))
     }
 
@@ -269,6 +231,7 @@ impl<T: Implement> OwnedObject<T> {
     where
         T: Implements<I>,
     {
+        // SAFETY: The handle keeps the allocation live and `Implements` gives a valid slot.
         unsafe { Object::<T>::slot_ptr(self.object.as_ptr(), <T as Implements<I>>::SLOT) }
     }
 
@@ -292,17 +255,18 @@ impl<T: Implement> OwnedObject<T> {
     #[must_use]
     pub unsafe fn from_raw(object: *mut Object<T>) -> Self {
         Self {
+            // SAFETY: The caller supplies a pointer from `into_raw`, which is never null.
             object: unsafe { NonNull::new_unchecked(object) },
         }
     }
 
     fn borrow_slot<I: CppInterface>(&self, slot: usize) -> InterfaceRef<'_, I> {
-        let pointer = unsafe { Object::<T>::slot_ptr(self.object.as_ptr(), slot) };
-        // Interface's layout contract guarantees that these pointer bytes form I.
-        let interface = unsafe { core::ptr::read(core::ptr::from_ref(&pointer).cast::<I>()) };
-        InterfaceRef {
-            interface,
-            lifetime: PhantomData,
+        // SAFETY: The handle keeps the allocation live and callers pass a valid slot
+        // whose header is compatible with `I`. The pointer lies inside a non-null
+        // allocation, and the returned borrow cannot outlive the handle.
+        unsafe {
+            let pointer = Object::<T>::slot_ptr(self.object.as_ptr(), slot);
+            InterfaceRef::from_non_null(NonNull::new_unchecked(pointer))
         }
     }
 }
@@ -311,12 +275,26 @@ impl<T: Implement> Deref for OwnedObject<T> {
     type Target = T;
 
     fn deref(&self) -> &T {
-        self.get()
+        // SAFETY: The handle uniquely owns a live allocation for its whole lifetime.
+        unsafe { self.object.as_ref() }.data()
+    }
+}
+
+impl<T: Implement> fmt::Debug for OwnedObject<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "OwnedObject<{}>({:p})",
+            type_name::<T>(),
+            self.object
+        )
     }
 }
 
 impl<T: Implement> Drop for OwnedObject<T> {
     fn drop(&mut self) {
+        // SAFETY: The handle solely owns the allocation, and every interface borrow
+        // of the handle has ended.
         unsafe { Object::<T>::destroy(self.object.as_ptr()) };
     }
 }
@@ -326,14 +304,33 @@ unsafe impl<T: Implement + Send> Send for OwnedObject<T> {}
 // SAFETY: Shared handle methods expose only shared references to T.
 unsafe impl<T: Implement + Sync> Sync for OwnedObject<T> {}
 
-/// Obtain an interface pointer from an implementation method's `self` value.
+/// Borrow an interface of the object containing an implementation method's `self`.
+///
+/// Name only the interface, as in `interface_of::<IFoo>(self)`. The returned view's
+/// `as_raw` gives the raw pointer for a foreign caller.
 ///
 /// # Safety
 ///
-/// `data` must be the implementation field inside a live [`Object<T>`]. A standalone
-/// instance of `T` does not satisfy this requirement.
+/// `data` must be the implementation field inside a live [`Object`]. A standalone
+/// instance of the implementation type does not satisfy this requirement.
 #[must_use]
-pub unsafe fn interface_of<T: Implements<I>, I: CppInterface>(data: &T) -> *mut c_void {
-    let object = unsafe { Object::<T>::of_data(data) };
-    unsafe { Object::<T>::slot_ptr(object, <T as Implements<I>>::SLOT) }
+pub unsafe fn interface_of<I: CppInterface>(data: &impl Implements<I>) -> InterfaceRef<'_, I> {
+    // SAFETY: The caller guarantees `data` is embedded in a live object.
+    unsafe { embedded_interface(data) }
+}
+
+/// Name the implementation type hidden by `interface_of`'s `impl Trait` argument.
+///
+/// # Safety
+///
+/// See [`interface_of`].
+unsafe fn embedded_interface<T: Implements<I>, I: CppInterface>(data: &T) -> InterfaceRef<'_, I> {
+    // SAFETY: `data` lives in an `Object<T>`, so the recovered allocation is live for
+    // the borrow of `data`, `Implements` gives a slot compatible with `I`, and the
+    // header address inside that allocation is non-null.
+    unsafe {
+        let object = Object::<T>::of_data(data);
+        let pointer = Object::<T>::slot_ptr(object, <T as Implements<I>>::SLOT);
+        InterfaceRef::from_non_null(NonNull::new_unchecked(pointer))
+    }
 }

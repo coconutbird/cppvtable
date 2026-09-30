@@ -11,5 +11,9 @@ repository.workspace = true
 [dependencies]
 cppvtable-macro.workspace = true
 
+[features]
+# Link the target C++ runtime's pointer `dynamic_cast` as `DynamicCastRuntime::TARGET`.
+native-dynamic-cast = []
+
 [lints]
 workspace = true

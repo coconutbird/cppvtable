@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 
 use cppvtable_com::{
     ComObject, ComPtr, E_POINTER, HRESULT, PrivateRef, RefCounted, S_FALSE, S_OK, implement,
-    interface, unknown_add_ref, unknown_release,
+    interface, unknown_add_ref, unknown_release, write_out,
 };
 
 /// The device interface.
@@ -38,7 +38,7 @@ pub unsafe trait IDevice9 {
     /// # Safety
     ///
     /// `texture` must be null or aligned and writable for one pointer. Null returns `E_POINTER`.
-    unsafe fn GetTexture(&self, stage: u32, texture: *mut *mut c_void) -> HRESULT;
+    unsafe fn GetTexture(&self, stage: u32, texture: *mut Option<ComPtr<ITexture9>>) -> HRESULT;
 }
 
 /// The base interface of a resource.
@@ -50,7 +50,7 @@ pub unsafe trait IResource9 {
     ///
     /// The resource must have a live public reference keeping its device alive. `device`
     /// must be null or aligned and writable for one pointer. Null returns `E_POINTER`.
-    unsafe fn GetDevice(&self, device: *mut *mut c_void) -> HRESULT;
+    unsafe fn GetDevice(&self, device: *mut Option<ComPtr<IDevice9>>) -> HRESULT;
 }
 
 /// A texture.
@@ -106,8 +106,9 @@ impl IDevice9Impl for Device {
         if stage != 0 {
             return E_POINTER;
         }
-        // SAFETY: The application gives a valid interface pointer or a null pointer.
-        let new = unsafe { PrivateRef::<Texture>::from_raw(texture) };
+        // SAFETY: The application gives a valid interface pointer or a null pointer, and
+        // owns a reference of it for the call.
+        let new = unsafe { PrivateRef::<Texture>::from_raw_add_ref(texture) };
         if !texture.is_null() && new.is_none() {
             // The pointer belongs to another process or to another implementation.
             return E_POINTER;
@@ -117,23 +118,23 @@ impl IDevice9Impl for Device {
         S_OK
     }
 
-    unsafe fn GetTexture(&self, stage: u32, texture: *mut *mut c_void) -> HRESULT {
-        if texture.is_null() {
-            return E_POINTER;
-        }
-        // SAFETY: The pointer is not null and the application gives a writable place.
-        unsafe { *texture = ptr::null_mut() };
+    unsafe fn GetTexture(&self, stage: u32, texture: *mut Option<ComPtr<ITexture9>>) -> HRESULT {
         if stage != 0 {
+            // SAFETY: The application gives a null or writable place. The stage error
+            // wins over the status of the write.
+            let _ = unsafe { write_out(texture, None) };
             return E_POINTER;
         }
         let bound = self.bound.lock().unwrap().clone();
-        let Some(bound) = bound else {
-            return S_FALSE;
-        };
-        let public: ComPtr<ITexture9> = bound.to_public();
-        // SAFETY: The pointer is not null and the application gives a writable place.
-        unsafe { *texture = public.into_raw() };
-        S_OK
+        let public = bound.as_ref().map(PrivateRef::to_public);
+        let found = public.is_some();
+        // SAFETY: The application gives a null or writable place.
+        let status = unsafe { write_out(texture, public) };
+        if status.is_ok() && !found {
+            S_FALSE
+        } else {
+            status
+        }
     }
 }
 
@@ -183,16 +184,11 @@ impl Drop for Texture {
 }
 
 impl IResource9Impl for Texture {
-    unsafe fn GetDevice(&self, device: *mut *mut c_void) -> HRESULT {
-        if device.is_null() {
-            return E_POINTER;
-        }
-        let pointer = self.device();
+    unsafe fn GetDevice(&self, device: *mut Option<ComPtr<IDevice9>>) -> HRESULT {
         // SAFETY: The device is alive while this texture has a public reference.
-        unsafe { unknown_add_ref(pointer) };
-        // SAFETY: The pointer is not null and the application gives a writable place.
-        unsafe { *device = pointer };
-        S_OK
+        let pointer = unsafe { ComPtr::from_raw_add_ref(self.device()) };
+        // SAFETY: The application gives a null or writable place.
+        unsafe { write_out(device, pointer) }
     }
 }
 
@@ -226,12 +222,11 @@ fn a_live_resource_keeps_the_device_alive() {
     assert_eq!(counters.texture_first.load(Ordering::Relaxed), 1);
 
     // `GetDevice` gives one more public reference.
-    let mut raw: *mut c_void = ptr::null_mut();
-    // SAFETY: The object is alive and `raw` is a local value.
-    assert!(unsafe { texture.GetDevice(&raw mut raw) }.is_ok());
-    assert_eq!(raw, device.as_raw());
-    // SAFETY: `GetDevice` added the reference that this `ComPtr` owns.
-    let from_texture = unsafe { ComPtr::<IDevice9>::from_raw(raw) }.unwrap();
+    let mut from_texture = None;
+    // SAFETY: The object is alive and `from_texture` is a local value.
+    assert!(unsafe { texture.GetDevice(&raw mut from_texture) }.is_ok());
+    let from_texture = from_texture.unwrap();
+    assert_eq!(from_texture.as_raw(), device.as_raw());
     assert_eq!(device.public_count_of::<Device>(), Some(3));
     drop(from_texture);
 
@@ -239,8 +234,7 @@ fn a_live_resource_keeps_the_device_alive() {
     let device_raw = device.as_raw();
     drop(device);
     assert_eq!(counters.device_drops.load(Ordering::Relaxed), 0);
-    // SAFETY: The object is alive.
-    assert_eq!(unsafe { texture.GetLevelCount() }, 3);
+    assert_eq!(texture.GetLevelCount(), 3);
 
     drop(texture);
     assert_eq!(counters.texture_drops.load(Ordering::Relaxed), 1);
@@ -266,16 +260,14 @@ fn a_bound_resource_stays_alive_and_keeps_its_address() {
     assert_eq!(device.public_count_of::<Device>(), Some(1));
 
     // `GetTexture` gives the same pointer back and brings the public count to 1.
-    let mut raw: *mut c_void = ptr::null_mut();
-    // SAFETY: The device is alive and `raw` is a local value.
-    assert!(unsafe { device.GetTexture(0, &raw mut raw) }.is_ok());
-    assert_eq!(raw, address);
+    let mut again = None;
+    // SAFETY: The device is alive and `again` is a local value.
+    assert!(unsafe { device.GetTexture(0, &raw mut again) }.is_ok());
+    let again = again.unwrap();
+    assert_eq!(again.as_raw(), address);
     assert_eq!(counters.texture_first.load(Ordering::Relaxed), 2);
     assert_eq!(device.public_count_of::<Device>(), Some(2));
-    // SAFETY: `GetTexture` added the reference that this `ComPtr` owns.
-    let again = unsafe { ComPtr::<ITexture9>::from_raw(raw) }.unwrap();
-    // SAFETY: The object is alive.
-    assert_eq!(unsafe { again.GetLevelCount() }, 3);
+    assert_eq!(again.GetLevelCount(), 3);
 
     drop(again);
     drop(device);
@@ -335,10 +327,10 @@ fn set_texture_refuses_a_pointer_of_another_implementation() {
     // A null pointer clears the stage.
     // SAFETY: The device is alive.
     assert!(unsafe { device.SetTexture(0, ptr::null_mut()) }.is_ok());
-    let mut raw: *mut c_void = ptr::null_mut();
-    // SAFETY: The device is alive and `raw` is a local value.
-    assert_eq!(unsafe { device.GetTexture(0, &raw mut raw) }, S_FALSE);
-    assert!(raw.is_null());
+    let mut none = None;
+    // SAFETY: The device is alive and `none` is a local value.
+    assert_eq!(unsafe { device.GetTexture(0, &raw mut none) }, S_FALSE);
+    assert!(none.is_none());
 
     // The pointer of the device is not a texture.
     // SAFETY: The device is alive.

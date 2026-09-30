@@ -73,23 +73,12 @@ impl IPointerViewImpl for PointerFirstValue {
     }
 }
 
-#[cfg(all(target_arch = "x86", target_os = "windows"))]
 #[interface(abi = c, layout = inline, slots = 50)]
 unsafe trait IInlinePartial {
     #[slot(32)]
     #[abi(convention = "stdcall")]
     fn known(&self, increment: i32) -> i32;
     #[abi(convention = "fastcall")]
-    fn update(&self, value: i32);
-}
-
-#[cfg(not(all(target_arch = "x86", target_os = "windows")))]
-#[interface(abi = c, layout = inline, slots = 50)]
-unsafe trait IInlinePartial {
-    #[slot(32)]
-    #[abi(convention = "system")]
-    fn known(&self, increment: i32) -> i32;
-    #[abi(convention = "C")]
     fn update(&self, value: i32);
 }
 
@@ -122,23 +111,33 @@ unsafe extern "C" {
 
 #[test]
 fn rust_calls_native_inline_base_and_derived_state_methods() {
-    // SAFETY: C allocates the matching derived object and local output remains writable.
-    unsafe {
-        let raw = cppvtable_c_inline_create(0x1_0000_002a);
-        assert!(!raw.is_null());
-        let interface = IInlineDerived::from_raw_ref(&raw);
-        assert_eq!(interface.vtable().cast::<c_void>(), raw.cast_const());
+    // SAFETY: C allocates the matching derived object.
+    let raw = unsafe { cppvtable_c_inline_create(0x1_0000_002a) };
+    {
+        // SAFETY: The C object lives until the delete below, after the last borrow.
+        let interface = unsafe { IInlineDerived::from_raw(raw) }.expect("C allocation succeeded");
+        assert_eq!(
+            std::ptr::from_ref(interface.vtable()).cast::<c_void>(),
+            raw.cast_const()
+        );
         assert_eq!(interface.get(), 0x1_0000_002a);
         interface.set(-7);
-        assert_eq!(cppvtable_c_inline_native_state(raw), -7);
+        // SAFETY: `raw` is the live C object.
+        assert_eq!(unsafe { cppvtable_c_inline_native_state(raw) }, -7);
         let mut output = 0;
-        interface.write(&raw mut output);
+        // SAFETY: `output` is a writable local.
+        unsafe { interface.write(&raw mut output) };
         assert_eq!(output, -7);
-        let base = IInlineBase::from_raw_ref(&raw);
+        // SAFETY: The base table is the prefix of the same live object.
+        let base = unsafe { IInlineBase::from_raw(raw) }.expect("C allocation succeeded");
         assert_eq!(base.get(), -7);
-        assert_eq!(base.vtable().cast::<c_void>(), raw.cast_const());
-        cppvtable_c_inline_delete(raw);
+        assert_eq!(
+            std::ptr::from_ref(base.vtable()).cast::<c_void>(),
+            raw.cast_const()
+        );
     }
+    // SAFETY: The C allocation is deleted once, after its last borrow.
+    unsafe { cppvtable_c_inline_delete(raw) };
 }
 
 #[test]
@@ -152,9 +151,12 @@ fn native_c_calls_rust_inline_table_and_secondary_pointer_table() {
         pointer as usize - inline as usize,
         std::mem::size_of::<IInlineDerivedVtbl>()
     );
-    let base = owner.query_interface::<IInlineBase>().expect("inline base");
+    let base = owner.try_interface::<IInlineBase>().expect("inline base");
     assert_eq!(base.as_raw(), inline);
-    assert_eq!(base.vtable().cast::<c_void>(), inline.cast_const());
+    assert_eq!(
+        std::ptr::from_ref(base.vtable()).cast::<c_void>(),
+        inline.cast_const()
+    );
     // SAFETY: The owner keeps both tables alive; local output remains writable.
     unsafe {
         assert_eq!(cppvtable_c_inline_get(inline), 0x1_0000_002a);
@@ -165,7 +167,7 @@ fn native_c_calls_rust_inline_table_and_secondary_pointer_table() {
         assert_eq!(output, -7);
         assert_eq!(cppvtable_c_inline_pointer_view_get(pointer), -7);
     }
-    assert_eq!(owner.get().value.get(), -7);
+    assert_eq!(owner.value.get(), -7);
 }
 
 #[test]
@@ -179,9 +181,12 @@ fn native_c_calls_rust_secondary_inline_table_after_primary_pointer_table() {
         inline as usize - pointer as usize,
         std::mem::size_of::<usize>()
     );
-    let base = owner.query_interface::<IInlineBase>().expect("inline base");
+    let base = owner.try_interface::<IInlineBase>().expect("inline base");
     assert_eq!(base.as_raw(), inline);
-    assert_eq!(base.vtable().cast::<c_void>(), inline.cast_const());
+    assert_eq!(
+        std::ptr::from_ref(base.vtable()).cast::<c_void>(),
+        inline.cast_const()
+    );
     // SAFETY: The owner keeps both tables alive; local output remains writable.
     unsafe {
         assert_eq!(cppvtable_c_inline_get(inline), 42);
@@ -191,7 +196,7 @@ fn native_c_calls_rust_secondary_inline_table_after_primary_pointer_table() {
         assert_eq!(output, 7);
         assert_eq!(cppvtable_c_inline_pointer_view_get(pointer), 7);
     }
-    assert_eq!(owner.get().value.get(), 7);
+    assert_eq!(owner.value.get(), 7);
 }
 
 #[test]
@@ -205,17 +210,22 @@ fn rust_calls_native_inline_partial_table_with_mixed_conventions() {
         32 * std::mem::size_of::<usize>()
     );
     // SAFETY: The native table has all 50 entries with matching functions at entries 32 and 33.
-    unsafe {
-        let raw = cppvtable_c_inline_partial_create(10);
-        assert!(!raw.is_null());
-        let interface = IInlinePartial::from_raw_ref(&raw);
-        assert_eq!(interface.vtable().cast::<c_void>(), raw.cast_const());
+    let raw = unsafe { cppvtable_c_inline_partial_create(10) };
+    {
+        // SAFETY: The C object lives until the delete below, after the last borrow.
+        let interface = unsafe { IInlinePartial::from_raw(raw) }.expect("C allocation succeeded");
+        assert_eq!(
+            std::ptr::from_ref(interface.vtable()).cast::<c_void>(),
+            raw.cast_const()
+        );
         assert_eq!(interface.known(7), 17);
         interface.update(20);
         assert_eq!(interface.known(7), 27);
-        assert_eq!(cppvtable_c_inline_partial_native_state(raw), 20);
-        cppvtable_c_inline_delete(raw);
+        // SAFETY: `raw` is the live C object.
+        assert_eq!(unsafe { cppvtable_c_inline_partial_native_state(raw) }, 20);
     }
+    // SAFETY: The C allocation is deleted once, after its last borrow.
+    unsafe { cppvtable_c_inline_delete(raw) };
 }
 
 #[test]
@@ -230,5 +240,5 @@ fn native_c_calls_rust_inline_partial_table_with_mixed_conventions() {
         cppvtable_c_inline_partial_update(raw, 20);
         assert_eq!(cppvtable_c_inline_partial_call(raw, 7), 27);
     }
-    assert_eq!(owner.get().value.get(), 20);
+    assert_eq!(owner.value.get(), 20);
 }

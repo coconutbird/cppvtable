@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use cppvtable_com::Interface;
 use cppvtable_com::{
-    ComObject, ComPtr, DualRefCount, ForwardRefCount, IUnknownVtbl, OwnedObject, PrivateRef,
+    ChildObject, ComObject, ComPtr, DualRefCount, ForwardRefCount, IUnknownVtbl, PrivateRef,
     RefCounted, SingleRefCount, implement, interface, interface_of,
 };
 
@@ -116,7 +116,7 @@ struct Container {
     log: Arc<Log>,
     /// The children. The container makes them after its own allocation, because a child
     /// needs the interface pointer of the container.
-    children: OnceLock<Vec<OwnedObject<Child>>>,
+    children: OnceLock<Vec<ChildObject<Child>>>,
 }
 
 // SAFETY: Hooks obey the reference-count contract and all returned pointers stay live.
@@ -202,8 +202,7 @@ fn a_single_count_object_lives_from_the_first_reference_to_the_last() {
         log: Arc::clone(&log),
     });
     assert_eq!(log.take(), ["single:first"]);
-    // SAFETY: The object is alive.
-    assert_eq!(unsafe { object.Value() }, 1);
+    assert_eq!(object.Value(), 1);
 
     let this = object.as_raw();
     // SAFETY: The test owns one public reference.
@@ -233,7 +232,7 @@ fn a_private_reference_keeps_a_dual_count_object_alive() {
     assert_eq!(log.take(), ["dual:last"]);
     assert_eq!(private.public_count(), 0);
     assert_eq!(private.private_count(), 1);
-    assert_eq!(private.get().Value(), 2);
+    assert_eq!(private.Value(), 2);
 
     // The private reference goes away. The object is destroyed.
     drop(private);
@@ -311,17 +310,20 @@ fn a_private_reference_comes_from_a_raw_pointer_of_the_application() {
     // object behind it.
     let raw = object.as_raw();
     // SAFETY: The pointer is a valid interface pointer of a live object.
-    let private = unsafe { PrivateRef::<Dual>::from_raw(raw) }.unwrap();
+    let private = unsafe { PrivateRef::<Dual>::from_raw_add_ref(raw) }.unwrap();
     assert_eq!(private.private_count(), 1);
-    assert!(ptr::eq(private.get(), object.as_impl::<Dual>().unwrap()));
+    assert!(ptr::eq(
+        ptr::from_ref(&*private),
+        object.as_impl::<Dual>().unwrap()
+    ));
 
     // A pointer that this process did not make gives `None`.
     let mut foreign_object: *const c_void = ptr::from_ref(&FOREIGN_VTABLE).cast();
     let foreign: *mut c_void = ptr::from_mut(&mut foreign_object).cast();
     // SAFETY: The place holds a pointer whose first field is a vtable pointer.
-    assert!(unsafe { PrivateRef::<Dual>::from_raw(foreign) }.is_none());
+    assert!(unsafe { PrivateRef::<Dual>::from_raw_add_ref(foreign) }.is_none());
     // SAFETY: A null pointer is a valid argument.
-    assert!(unsafe { PrivateRef::<Dual>::from_raw(ptr::null_mut()) }.is_none());
+    assert!(unsafe { PrivateRef::<Dual>::from_raw_add_ref(ptr::null_mut()) }.is_none());
     assert!(object.as_impl::<Single>().is_none());
 
     drop(object);
@@ -341,9 +343,9 @@ fn a_child_sends_its_counts_to_the_container_and_dies_with_it() {
     });
     let value = container.as_impl::<Container>().unwrap();
     let this = container.as_raw();
-    let children: Vec<OwnedObject<Child>> = (0..2)
+    let children: Vec<ChildObject<Child>> = (0..2)
         .map(|index| {
-            OwnedObject::new(Child {
+            ChildObject::new(Child {
                 index,
                 container: AtomicPtr::new(this),
                 log: Arc::clone(&log),
@@ -360,8 +362,7 @@ fn a_child_sends_its_counts_to_the_container_and_dies_with_it() {
     // SAFETY: The container owns the child handle until its own destruction.
     let child: ComPtr<IChild> = unsafe { list[1].to_public() };
     assert_eq!(container.public_count_of::<Container>(), Some(2));
-    // SAFETY: The object is alive.
-    assert_eq!(unsafe { child.Index() }, 1);
+    assert_eq!(child.Index(), 1);
     assert_ne!(child.as_raw(), this);
 
     // `AddRef` of the child answers with the count of the container.
@@ -406,7 +407,7 @@ fn a_child_stays_alive_while_the_application_holds_a_reference_of_it() {
     assert!(
         value
             .children
-            .set(vec![OwnedObject::new(Child {
+            .set(vec![ChildObject::new(Child {
                 index: 0,
                 container: AtomicPtr::new(this),
                 log: Arc::clone(&log),
@@ -420,8 +421,7 @@ fn a_child_stays_alive_while_the_application_holds_a_reference_of_it() {
     // so nothing is destroyed.
     drop(container);
     assert_eq!(log.take(), ["container:first"]);
-    // SAFETY: The object is alive.
-    assert_eq!(unsafe { child.Index() }, 0);
+    assert_eq!(child.Index(), 0);
 
     // The last reference of the child is the last reference of the container.
     drop(child);
@@ -443,7 +443,7 @@ fn the_interface_pointer_of_a_child_is_not_the_pointer_of_the_container() {
     assert!(
         value
             .children
-            .set(vec![OwnedObject::new(Child {
+            .set(vec![ChildObject::new(Child {
                 index: 5,
                 container: AtomicPtr::new(this),
                 log: Arc::clone(&log),
@@ -457,7 +457,7 @@ fn the_interface_pointer_of_a_child_is_not_the_pointer_of_the_container() {
     // The pointer of `as_raw` does not change a count.
     assert_eq!(container.public_count_of::<Container>(), Some(1));
     // SAFETY: `owned` holds a live object.
-    let same = unsafe { interface_of::<Child, IChild>(owned.get()) };
+    let same = unsafe { interface_of::<Child, IChild>(owned) };
     assert_eq!(same, raw);
     assert_eq!(IChild::NAME, "IChild");
 }

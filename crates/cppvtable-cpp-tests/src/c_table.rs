@@ -55,22 +55,26 @@ unsafe extern "C" {
 
 #[test]
 fn rust_calls_c_table() {
-    // SAFETY: C allocates the matching object and it lives through all calls.
-    unsafe {
-        let raw = cppvtable_c_create(0x1_0000_002a);
-        assert!(!raw.is_null());
-        let interface = ICValue::from_raw_ref(&raw);
+    // SAFETY: C allocates a matching object.
+    let raw = unsafe { cppvtable_c_create(0x1_0000_002a) };
+    {
+        // SAFETY: The C object lives until the delete below, after the last borrow.
+        let interface = unsafe { ICValue::from_raw(raw) }.expect("C allocation succeeded");
         assert_eq!(interface.get(), 0x1_0000_002a);
         interface.set(-7);
         assert_eq!(interface.get(), -7);
-        assert_eq!(cppvtable_c_get(raw), -7);
+        // SAFETY: `raw` is the live C object.
+        assert_eq!(unsafe { cppvtable_c_get(raw) }, -7);
         let input = 0x1_0000_0042_i64;
-        assert_eq!(interface.read(&raw const input), input);
+        // SAFETY: `input` is an initialized local.
+        assert_eq!(unsafe { interface.read(&raw const input) }, input);
         let mut output = 0;
-        interface.write(&raw mut output);
+        // SAFETY: `output` is a writable local.
+        unsafe { interface.write(&raw mut output) };
         assert_eq!(output, -7);
-        cppvtable_c_delete(raw);
     }
+    // SAFETY: The C allocation is deleted once, after its last borrow.
+    unsafe { cppvtable_c_delete(raw) };
 }
 
 #[test]
@@ -90,7 +94,7 @@ fn c_calls_rust_table() {
         cppvtable_c_write(raw, &raw mut output);
         assert_eq!(output, -7);
     }
-    assert_eq!(owner.get().value.get(), -7);
+    assert_eq!(owner.value.get(), -7);
 }
 
 #[test]

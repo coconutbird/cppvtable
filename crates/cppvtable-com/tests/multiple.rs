@@ -123,13 +123,10 @@ fn the_this_adjustment_of_each_chain_finds_the_same_value() {
     let beta: ComPtr<IBeta> = object.cast().unwrap();
     let gamma: ComPtr<IGamma> = object.cast().unwrap();
 
-    // SAFETY: The object is alive.
-    unsafe {
-        assert_eq!(object.ChildValue(), 21);
-        assert_eq!(object.AlphaValue(), 11);
-        assert_eq!(beta.BetaValue(), 31);
-        assert_eq!(gamma.GammaValue(), 41);
-    }
+    assert_eq!(object.ChildValue(), 21);
+    assert_eq!(object.AlphaValue(), 11);
+    assert_eq!(beta.BetaValue(), 31);
+    assert_eq!(gamma.GammaValue(), 41);
 
     // A change through one chain is visible through every other chain.
     object.as_impl::<Multi>().unwrap();
@@ -137,11 +134,8 @@ fn the_this_adjustment_of_each_chain_finds_the_same_value() {
         .unwrap()
         .value
         .store(100, Ordering::Relaxed);
-    // SAFETY: The object is alive.
-    unsafe {
-        assert_eq!(object.ChildValue(), 120);
-        assert_eq!(gamma.GammaValue(), 140);
-    }
+    assert_eq!(object.ChildValue(), 120);
+    assert_eq!(gamma.GammaValue(), 140);
 }
 
 #[test]
@@ -185,13 +179,8 @@ fn as_impl_works_from_every_chain_and_refuses_another_type() {
 }
 
 /// Another implementation type. `as_impl` must not answer for it.
-#[implement(IGamma)]
+#[implement(IGamma, refcount = single)]
 struct Other;
-
-// SAFETY: Hooks obey the reference-count contract and all returned pointers stay live.
-unsafe impl RefCounted for Other {
-    type Policy = SingleRefCount;
-}
 
 impl IGammaImpl for Other {
     fn GammaValue(&self) -> u32 {
@@ -213,8 +202,7 @@ fn the_hook_query_extra_answers_an_identifier_that_the_table_does_not_hold() {
 
     // SAFETY: The hook added the reference that this `ComPtr` owns.
     let extra = unsafe { ComPtr::<IBeta>::from_raw(out) }.unwrap();
-    // SAFETY: The object is alive.
-    assert_eq!(unsafe { extra.BetaValue() }, 31);
+    assert_eq!(extra.BetaValue(), 31);
     assert_eq!(
         object.public_count_of::<Multi>(),
         Some(count_before + 1),
@@ -223,15 +211,10 @@ fn the_hook_query_extra_answers_an_identifier_that_the_table_does_not_hold() {
 }
 
 /// The first of two types with exactly the same shape and the same method bodies.
-#[implement(IGamma)]
+#[implement(IGamma, refcount = single)]
 struct TwinA {
     /// The value of the twin.
     value: AtomicU32,
-}
-
-// SAFETY: Hooks obey the reference-count contract and all returned pointers stay live.
-unsafe impl RefCounted for TwinA {
-    type Policy = SingleRefCount;
 }
 
 impl IGammaImpl for TwinA {
@@ -241,15 +224,10 @@ impl IGammaImpl for TwinA {
 }
 
 /// The second of the two twins. The machine code of the two is the same.
-#[implement(IGamma)]
+#[implement(IGamma, refcount = single)]
 struct TwinB {
     /// The value of the twin.
     value: AtomicU32,
-}
-
-// SAFETY: Hooks obey the reference-count contract and all returned pointers stay live.
-unsafe impl RefCounted for TwinB {
-    type Policy = SingleRefCount;
 }
 
 impl IGammaImpl for TwinB {
@@ -283,11 +261,8 @@ fn two_types_with_the_same_shape_keep_two_vtables() {
     assert!(second.as_impl::<TwinB>().is_some());
     assert!(second.as_impl::<TwinA>().is_none());
 
-    // SAFETY: The two objects are alive.
-    unsafe {
-        assert_eq!(first.GammaValue(), 7);
-        assert_eq!(second.GammaValue(), 8);
-    }
+    assert_eq!(first.GammaValue(), 7);
+    assert_eq!(second.GammaValue(), 8);
 }
 
 #[test]

@@ -90,20 +90,21 @@ impl ISideImpl for Implementation {
 #[test]
 fn relative_metadata_cannot_silently_prefix_absolute_callback_tables() {
     // SAFETY: Valid static native metadata; this checked representation mismatch
-    // is explicitly permitted by the constructor and must fail before installation.
+    // is explicitly permitted by the builder and must fail before installation.
     unsafe {
-        let metadata = [
-            Some(RttiMetadata::from_interface_variant(
-                RttiVariant::ItaniumRelative32,
-                cppvtable_relative_primary(),
-            )),
-            Some(RttiMetadata::from_interface_variant(
-                RttiVariant::ItaniumRelative32,
-                cppvtable_relative_side(),
-            )),
-        ];
+        let primary = RttiMetadata::from_interface_variant(
+            RttiVariant::ItaniumRelative32,
+            cppvtable_relative_primary(),
+        );
+        let side = RttiMetadata::from_interface_variant(
+            RttiVariant::ItaniumRelative32,
+            cppvtable_relative_side(),
+        );
         assert!(matches!(
-            RttiClass::<Implementation>::new(&metadata),
+            RttiClass::<Implementation>::builder()
+                .with::<IPrimary>(primary)
+                .with::<ISide>(side)
+                .build(),
             Err(RttiError::UnsupportedVariant)
         ));
     }

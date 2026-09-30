@@ -10,10 +10,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use cppvtable_com::ComInterface;
-use cppvtable_com::{
-    ComObject, ComPtr, E_POINTER, HRESULT, IUnknown, RefCounted, S_OK, SingleRefCount, implement,
-    interface,
-};
+use cppvtable_com::{ComObject, ComPtr, E_POINTER, HRESULT, IUnknown, S_OK, implement, interface};
 
 /// The root of the chain.
 #[interface(abi = com, iid = "3b0f0001-0000-4000-8000-000000000001")]
@@ -43,17 +40,12 @@ pub unsafe trait ITexture {
 }
 
 /// The object of the chain.
-#[implement(ITexture)]
+#[implement(ITexture, refcount = single)]
 struct Texture {
     /// The priority of the resource.
     priority: AtomicU32,
     /// The number of levels.
     levels: u32,
-}
-
-// SAFETY: Hooks obey the reference-count contract and all returned pointers stay live.
-unsafe impl RefCounted for Texture {
-    type Policy = SingleRefCount;
 }
 
 impl IResourceImpl for Texture {
@@ -153,11 +145,12 @@ fn the_deref_chain_gives_the_methods_of_each_base_interface() {
     let texture = new_texture();
     // `ComPtr<ITexture>` derefs to `ITexture`, then to `IBaseTexture`, then to
     // `IResource`, then to `IUnknown`.
-    // SAFETY: The object is alive.
+    assert_eq!(texture.GetLevelCount(), 4);
+    assert_eq!(texture.SetPriority(3), 0);
+    assert_eq!(texture.GetPriority(), 3);
+    // SAFETY: The object is alive, and `Release` removes the reference that `AddRef`
+    // added.
     unsafe {
-        assert_eq!(texture.GetLevelCount(), 4);
-        assert_eq!(texture.SetPriority(3), 0);
-        assert_eq!(texture.GetPriority(), 3);
         assert_eq!(texture.AddRef(), 2);
         assert_eq!(texture.Release(), 1);
     }
@@ -180,26 +173,24 @@ fn query_interface_answers_every_ancestor_with_the_same_pointer() {
     let leaf: ComPtr<ITexture> = resource.cast().unwrap();
     assert_eq!(leaf.as_raw(), this);
 
-    // SAFETY: The object is alive.
-    assert_eq!(unsafe { resource.GetPriority() }, 0);
+    assert_eq!(resource.GetPriority(), 0);
 }
 
 #[test]
 fn a_pointer_of_a_base_interface_calls_the_method_of_the_object() {
     let texture = new_texture();
     let resource: ComPtr<IResource> = texture.cast().unwrap();
-    // SAFETY: The object is alive.
-    unsafe { resource.SetPriority(11) };
+    resource.SetPriority(11);
 
     // The interface reference of a borrowed raw pointer gives the same answer.
     let raw = texture.as_raw();
-    // SAFETY: The place holds a valid interface pointer of a live object.
-    let borrowed = unsafe { IResource::from_raw_ref(&raw) };
-    // SAFETY: The object is alive.
-    assert_eq!(unsafe { borrowed.GetPriority() }, 11);
+    // SAFETY: `raw` is a valid interface pointer of a live object, and `texture` keeps
+    // it alive while `borrowed` lives.
+    let borrowed = unsafe { IResource::from_raw(raw) }.unwrap();
+    assert_eq!(borrowed.GetPriority(), 11);
     assert_eq!(borrowed.as_raw(), raw);
     assert!(ptr::eq(
-        borrowed.vtable().cast::<u8>(),
-        texture.vtable().cast::<u8>()
+        ptr::from_ref(borrowed.vtable()).cast::<u8>(),
+        ptr::from_ref(texture.vtable()).cast::<u8>()
     ));
 }

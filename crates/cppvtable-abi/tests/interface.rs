@@ -3,7 +3,8 @@
 use core::ffi::c_void;
 use core::mem::{offset_of, size_of};
 
-use cppvtable_abi::{Interface, interface, raw_of, vtable_of};
+use cppvtable_abi::interface::{raw_of, vtable_of};
+use cppvtable_abi::{Interface, interface};
 
 /// The base C interface.
 #[interface(abi = c)]
@@ -47,16 +48,13 @@ fn inherited_c_table_can_be_called_through_a_borrowed_pointer() {
     };
     let pointer = core::ptr::from_mut(&mut value).cast::<c_void>();
     // SAFETY: `pointer` refers to `value`, which stays alive for the entire borrow.
-    let interface = unsafe { IValueWithOffset::from_raw_ref(&pointer) };
+    let interface = unsafe { IValueWithOffset::from_raw(pointer) }.unwrap();
 
     assert_eq!(IValueWithOffset::NAME, "IValueWithOffset");
-    assert_eq!(raw_of(interface), pointer);
-    assert_eq!(vtable_of(interface), &raw const vtable);
+    assert_eq!(raw_of(&*interface), pointer);
+    assert!(core::ptr::eq(vtable_of(&*interface), &raw const vtable));
     assert_eq!(offset_of!(IValueWithOffsetVtbl, base), 0);
     assert_eq!(size_of::<IValueWithOffset>(), size_of::<*mut c_void>());
-    // SAFETY: The object and its vtable are live, and the argument is an ordinary value.
-    unsafe {
-        assert_eq!(interface.Get(), 41);
-        assert_eq!(interface.GetWithOffset(1), 42);
-    }
+    assert_eq!(interface.Get(), 41);
+    assert_eq!(interface.GetWithOffset(1), 42);
 }

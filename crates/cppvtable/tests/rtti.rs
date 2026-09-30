@@ -7,10 +7,11 @@ use core::ffi::c_void;
 use core::ptr;
 
 use cppvtable::rtti::{
-    ItaniumPrefix, MsvcAbsoluteLocator, MsvcPrefix, RttiClass, RttiError, RttiMetadata, RttiObject,
-    RttiVariant,
+    CppAbi, ItaniumPrefix, MsvcAbsoluteLocator, MsvcPrefix, RttiClass, RttiError, RttiMetadata,
+    RttiObject, RttiVariant,
 };
-use cppvtable::{Object, OwnedObject, implement, interface, vtable_of};
+use cppvtable::{Object, OwnedObject, implement, interface};
+use cppvtable_abi::interface::vtable_of;
 
 #[interface(abi = c)]
 unsafe trait IPlain {
@@ -89,34 +90,44 @@ fn itanium(offset: usize) -> RttiMetadata {
     unsafe { RttiMetadata::from_itanium_prefix_variant(RttiVariant::ItaniumPointer, prefix) }
 }
 
+/// Metadata for `abi`, reading `locator` only when it is Microsoft.
+///
+/// # Safety
+/// `locator` must outlive every use of the returned metadata.
+unsafe fn metadata_for(abi: CppAbi, offset: usize, locator: &MsvcAbsoluteLocator) -> RttiMetadata {
+    match abi {
+        // SAFETY: Guaranteed by the caller.
+        CppAbi::Msvc => unsafe { msvc(locator) },
+        CppAbi::Itanium => itanium(offset),
+    }
+}
+
 #[test]
 fn mixed_c_and_cpp_interfaces_install_rtti_only_on_the_cpp_header() {
     let offset = Object::<Mixed>::slot_offset(1);
     let msvc_locator = locator(offset, 0, &HIERARCHY);
     // SAFETY: The locator outlives the class and every object below.
-    let metadata = if cfg!(target_env = "msvc") {
-        unsafe { msvc(&msvc_locator) }
-    } else {
-        itanium(offset)
-    };
+    let metadata = unsafe { metadata_for(CppAbi::TARGET, offset, &msvc_locator) };
     // SAFETY: Synthetic metadata matches the Rust layout; no native code uses RTTI.
-    let class = unsafe { RttiClass::<Mixed>::new(&[None, Some(metadata)]) }.unwrap();
+    let class = unsafe {
+        RttiClass::<Mixed>::builder()
+            .with::<IValue>(metadata)
+            .build()
+    }
+    .unwrap();
     let object = RttiObject::new(Mixed { value: 5 }, &class);
     let plain = OwnedObject::new(Mixed { value: 0 });
 
-    // SAFETY: Both objects are live; the declared methods take no arguments.
-    unsafe {
-        assert_eq!(object.interface::<IPlain>().plain(), 5);
-        assert_eq!(object.interface::<IValue>().value(), 6);
-    }
-    assert_eq!(
+    assert_eq!(object.interface::<IPlain>().plain(), 5);
+    assert_eq!(object.interface::<IValue>().value(), 6);
+    assert!(ptr::eq(
         vtable_of(&*object.interface::<IPlain>()),
         vtable_of(&*plain.interface::<IPlain>())
-    );
-    assert_ne!(
+    ));
+    assert!(!ptr::eq(
         vtable_of(&*object.interface::<IValue>()),
         vtable_of(&*plain.interface::<IValue>())
-    );
+    ));
 
     let value = object.as_raw::<IValue>();
     // SAFETY: The installed prefix copies the synthetic metadata above.
@@ -129,30 +140,27 @@ fn mixed_c_and_cpp_interfaces_install_rtti_only_on_the_cpp_header() {
 }
 
 #[test]
-fn metadata_for_a_c_interface_is_rejected() {
-    let msvc_locator = locator(0, 0, &HIERARCHY);
-    // SAFETY: The locator outlives the metadata.
-    let metadata = if cfg!(target_env = "msvc") {
-        unsafe { msvc(&msvc_locator) }
-    } else {
-        itanium(0)
-    };
+fn a_cpp_interface_without_metadata_is_rejected() {
     // SAFETY: Rejected before any table is built.
-    let result = unsafe { RttiClass::<Mixed>::new(&[Some(metadata), Some(metadata)]) };
+    let result = unsafe { RttiClass::<Mixed>::builder().build() };
     assert!(matches!(result, Err(RttiError::InterfaceKind)));
 }
 
 #[test]
 fn metadata_from_the_other_cpp_abi_is_rejected() {
     let msvc_locator = locator(0, 0, &HIERARCHY);
-    // SAFETY: The locator outlives the metadata.
-    let foreign = if cfg!(target_env = "msvc") {
-        itanium(0)
-    } else {
-        unsafe { msvc(&msvc_locator) }
+    let other = match CppAbi::TARGET {
+        CppAbi::Msvc => CppAbi::Itanium,
+        CppAbi::Itanium => CppAbi::Msvc,
     };
+    // SAFETY: The locator outlives the metadata.
+    let foreign = unsafe { metadata_for(other, 0, &msvc_locator) };
     // SAFETY: Rejected before any table is built.
-    let result = unsafe { RttiClass::<Single>::new(&[Some(foreign)]) };
+    let result = unsafe {
+        RttiClass::<Single>::builder()
+            .with::<IValue>(foreign)
+            .build()
+    };
     assert!(matches!(result, Err(RttiError::AbiMismatch)));
 }
 
@@ -165,11 +173,15 @@ fn microsoft_construction_and_virtual_inheritance_metadata_is_rejected() {
     // mismatches are rejected before any table is built.
     unsafe {
         assert!(matches!(
-            RttiClass::<Single>::new(&[Some(msvc(&construction))]),
+            RttiClass::<Single>::builder()
+                .with::<IValue>(msvc(&construction))
+                .build(),
             Err(RttiError::ConstructionTable)
         ));
         assert!(matches!(
-            RttiClass::<Single>::new(&[Some(msvc(&virtual_base))]),
+            RttiClass::<Single>::builder()
+                .with::<IValue>(msvc(&virtual_base))
+                .build(),
             Err(RttiError::VirtualInheritance)
         ));
     }

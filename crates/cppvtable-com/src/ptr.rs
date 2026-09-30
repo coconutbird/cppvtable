@@ -1,4 +1,5 @@
-//! The two smart pointers: [`ComPtr`] and [`PrivateRef`].
+//! The two smart pointers: [`ComPtr`] and [`PrivateRef`], and the out-parameter helper
+//! [`write_out`].
 //!
 //! [`ComPtr<I>`] owns one public reference of the interface `I`. It works with an object
 //! of this process and with an object of the application.
@@ -13,9 +14,8 @@ use core::marker::PhantomData;
 use core::ops::Deref;
 use core::ptr::NonNull;
 
-use crate::interface::{
-    AgileInterface, ComInterface, IUnknownVtbl, unknown_add_ref, unknown_release,
-};
+use crate::hresult::{E_POINTER, HRESULT, S_OK};
+use crate::interface::{AgileInterface, ComInterface, unknown_add_ref, unknown_release};
 use crate::object::{ComImplement, ComObject, Implements};
 use crate::refcount::{PrivatePolicy, RefCountPolicy};
 
@@ -54,14 +54,46 @@ pub unsafe fn object_of_raw<T: ComImplement>(raw: *mut c_void) -> Option<*const 
     None
 }
 
+/// Write an interface pointer to a COM out-parameter and return the status.
+///
+/// Declare a COM out-parameter as `*mut Option<ComPtr<I>>`. `Option<ComPtr<I>>` has the
+/// layout of one nullable interface pointer, so the parameter has the ABI of
+/// `I** out` in C and C++, and a Rust caller can pass `&raw mut slot` for a local
+/// `let mut slot = None;`.
+///
+/// The function writes with [`core::ptr::write`]. It never reads or drops the old
+/// contents of the slot, which a foreign caller may leave uninitialized; an
+/// assignment `*out = value` would `Release` that garbage.
+///
+/// A null `out` gives `E_POINTER` and drops `value`, which releases its reference.
+/// Otherwise the slot takes the reference of `value` and the function gives `S_OK`,
+/// also for `None`; return another code yourself when a null result is a failure.
+///
+/// # Safety
+///
+/// `out` must be null or aligned and writable for one `Option<ComPtr<I>>`.
+pub unsafe fn write_out<I: ComInterface>(
+    out: *mut Option<ComPtr<I>>,
+    value: Option<ComPtr<I>>,
+) -> HRESULT {
+    if out.is_null() {
+        return E_POINTER;
+    }
+    // SAFETY: `out` is not null, and the caller gives an aligned, writable place. The
+    // write does not read the old contents.
+    unsafe { out.write(value) };
+    S_OK
+}
+
 /// An owning public reference of a COM interface `I`.
 ///
 /// For COM interfaces, `Clone` calls `AddRef` and `Drop` calls `Release`. The type
 /// derefs to `I`, so the methods of the interface and of each base interface are
-/// available.
+/// available, including [`crate::IUnknown::cast`] for `QueryInterface`.
 ///
 /// The type is `#[repr(transparent)]` over one non-null pointer, so
-/// `Option<ComPtr<I>>` has the size of a pointer.
+/// `Option<ComPtr<I>>` has the size of a pointer and the ABI of a nullable interface
+/// pointer; see [`write_out`] for out-parameters.
 ///
 /// Moving a pointer across threads requires an explicit [`AgileInterface`] contract.
 /// `IUnknown` itself has no such contract:
@@ -122,7 +154,8 @@ impl<I: ComInterface> ComPtr<I> {
     /// Add one public reference of a raw interface pointer and own it.
     ///
     /// Use it for a pointer that the application gave as an argument. The application
-    /// keeps its own reference.
+    /// keeps its own reference. For a typed interface reference, use
+    /// [`ComPtr::from_ref`].
     ///
     /// # Safety
     ///
@@ -137,6 +170,21 @@ impl<I: ComInterface> ComPtr<I> {
             ptr,
             marker: PhantomData,
         })
+    }
+
+    /// Add one public reference of a borrowed interface and own it.
+    ///
+    /// Use it for an interface that an argument or an [`crate::InterfaceRef`] borrows
+    /// when the result must outlive the borrow.
+    #[must_use]
+    pub fn from_ref(iface: &I) -> Self {
+        let ptr = cppvtable_abi::interface::raw_of(iface);
+        // SAFETY: An interface value exists only for a live interface pointer of `I`,
+        // and the borrow keeps the object alive during the call.
+        unsafe { unknown_add_ref(ptr) };
+        // SAFETY: The pointer of an interface value is not null, and the call above
+        // added the public reference that the `ComPtr` owns.
+        unsafe { Self::from_raw_unchecked(ptr) }
     }
 
     /// Add one public reference of the object of a Rust value and own it.
@@ -179,29 +227,6 @@ impl<I: ComInterface> ComPtr<I> {
     pub fn into_raw(self) -> *mut c_void {
         let kept = core::mem::ManuallyDrop::new(self);
         kept.ptr.as_ptr()
-    }
-
-    /// Ask the object for another interface.
-    ///
-    /// The method calls `QueryInterface` and gives `None` when the object does not have
-    /// the requested interface.
-    #[must_use]
-    pub fn cast<J: ComInterface>(&self) -> Option<ComPtr<J>> {
-        let iid = J::IID;
-        let mut out: *mut c_void = core::ptr::null_mut();
-        // SAFETY: The pointer is a valid COM interface pointer, so slot 0 of its vtable
-        // is `QueryInterface`. The two out-arguments refer to local values.
-        let result = unsafe {
-            let vtable = *self.ptr.as_ptr().cast::<*const IUnknownVtbl>();
-            ((*vtable).QueryInterface)(self.ptr.as_ptr(), &raw const iid, &raw mut out)
-        };
-        if result.is_err() {
-            return None;
-        }
-        NonNull::new(out).map(|ptr| ComPtr {
-            ptr,
-            marker: PhantomData,
-        })
     }
 
     /// Give the Rust value when this process made the object with the type `T`.
@@ -313,13 +338,14 @@ where
     /// Make a private reference of an object that this process made.
     ///
     /// Use it for an interface pointer that the application gives as an argument, for
-    /// example the texture of `SetTexture`. A pointer to a foreign object gives `None`.
+    /// example the texture of `SetTexture`. The call adds one private reference, and the
+    /// caller keeps its own reference. A pointer to a foreign object gives `None`.
     ///
     /// # Safety
     ///
     /// `raw` must be null or a valid interface pointer of a live object.
     #[must_use]
-    pub unsafe fn from_raw(raw: *mut c_void) -> Option<Self> {
+    pub unsafe fn from_raw_add_ref(raw: *mut c_void) -> Option<Self> {
         // SAFETY: The caller gives a valid interface pointer.
         let object = unsafe { object_of_raw::<T>(raw) }?;
         // SAFETY: The caller owns a reference of the object, so it is live.
@@ -336,7 +362,7 @@ where
     #[must_use]
     pub fn from_com_ptr<I: ComInterface>(pointer: &ComPtr<I>) -> Option<Self> {
         // SAFETY: A `ComPtr` holds a valid interface pointer of a live object.
-        unsafe { Self::from_raw(pointer.as_raw()) }
+        unsafe { Self::from_raw_add_ref(pointer.as_raw()) }
     }
 
     /// Make a private reference of the object of a Rust value.
@@ -360,14 +386,6 @@ where
             // SAFETY: `of_data` never gives a null pointer.
             object: unsafe { NonNull::new_unchecked(object.cast_mut()) },
         }
-    }
-
-    /// Give the Rust value.
-    #[inline]
-    #[must_use]
-    pub fn get(&self) -> &T {
-        // SAFETY: The private reference keeps the object alive.
-        unsafe { self.object.as_ref() }.data()
     }
 
     /// Give the interface pointer of `I` without a change of a count.
@@ -452,7 +470,8 @@ where
 
     #[inline]
     fn deref(&self) -> &T {
-        self.get()
+        // SAFETY: The private reference keeps the object alive.
+        unsafe { self.object.as_ref() }.data()
     }
 }
 

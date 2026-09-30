@@ -6,19 +6,21 @@ use cppvtable::{Object, OwnedObject};
 /// Test that Rust can call C++ objects through our interface.
 #[test]
 fn test_rust_calls_cpp_objects() {
+    let cpp_dog = create_cpp_dog("Max");
+    let cpp_cat = create_cpp_cat(7);
+
+    {
+        // SAFETY: Both C++ objects stay alive through the borrowed interface calls.
+        let dog_ref = unsafe { IForeignAnimal::from_raw(cpp_dog) }.unwrap();
+        // SAFETY: As above.
+        let cat_ref = unsafe { IForeignAnimal::from_raw(cpp_cat) }.unwrap();
+
+        assert_eq!(dog_ref.legs(), 4);
+        assert_eq!(cat_ref.legs(), 4);
+    }
+
+    // SAFETY: Each factory allocation is deleted once, after its last borrow.
     unsafe {
-        let cpp_dog = create_cpp_dog("Max");
-        let cpp_cat = create_cpp_cat(7);
-
-        {
-            // SAFETY: Both C++ objects stay alive through the borrowed interface calls.
-            let dog_ref = IForeignAnimal::from_raw_ref(&cpp_dog);
-            let cat_ref = IForeignAnimal::from_raw_ref(&cpp_cat);
-
-            assert_eq!(dog_ref.legs(), 4);
-            assert_eq!(cat_ref.legs(), 4);
-        }
-
         delete_cpp_dog(cpp_dog);
         delete_cpp_cat(cpp_cat);
     }
@@ -54,19 +56,19 @@ fn test_vtable_size() {
 /// Test round-trip: create in C++, read in Rust, verify in C++.
 #[test]
 fn test_cpp_rust_cpp_roundtrip() {
-    unsafe {
-        let cpp_dog = create_cpp_dog("Roundtrip");
+    let cpp_dog = create_cpp_dog("Roundtrip");
 
-        {
-            // SAFETY: The C++ object stays alive through both interface calls.
-            let dog_ref = IForeignAnimal::from_raw_ref(&cpp_dog);
-            let legs_via_rust = dog_ref.legs();
-            let legs_via_cpp = cpp_call_legs(cpp_dog);
+    {
+        // SAFETY: The C++ object stays alive through both interface calls.
+        let dog_ref = unsafe { IForeignAnimal::from_raw(cpp_dog) }.unwrap();
+        let legs_via_rust = dog_ref.legs();
+        // SAFETY: `cpp_dog` is a live CppDog.
+        let legs_via_cpp = unsafe { cpp_call_legs(cpp_dog) };
 
-            assert_eq!(legs_via_rust, legs_via_cpp);
-            assert_eq!(legs_via_rust, 4);
-        }
-
-        delete_cpp_dog(cpp_dog);
+        assert_eq!(legs_via_rust, legs_via_cpp);
+        assert_eq!(legs_via_rust, 4);
     }
+
+    // SAFETY: The factory allocation is deleted once, after its last borrow.
+    unsafe { delete_cpp_dog(cpp_dog) };
 }

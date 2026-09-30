@@ -236,6 +236,8 @@ fn assert_declared_method_safety(output: TokenStream) {
         ("protocol_state", true),
         ("aggregate", true),
         ("indirect", true),
+        ("safe_aggregate", false),
+        ("safe_indirect", false),
     ];
     for (name, is_unsafe) in expected {
         let method = implementation
@@ -266,9 +268,10 @@ fn assert_declared_method_safety(output: TokenStream) {
                 if let syn::ImplItem::Fn(item) = item {
                     if item.sig.ident == name {
                         callers += 1;
-                        assert!(
+                        assert_eq!(
                             matches!(item.sig.safety, syn::Safety::Unsafe(_)),
-                            "caller {name} must remain unsafe"
+                            is_unsafe,
+                            "caller {name} must keep the declared safety"
                         );
                     }
                 }
@@ -290,6 +293,10 @@ fn mixed_safety_contract() -> syn::ItemTrait {
             unsafe fn aggregate(&self) -> Aggregate;
             #[abi(hidden_return)]
             unsafe fn indirect(&self) -> Aggregate;
+            #[abi(aggregate)]
+            fn safe_aggregate(&self) -> Aggregate;
+            #[abi(hidden_return)]
+            fn safe_indirect(&self) -> Aggregate;
         }
     }
 }
@@ -318,6 +325,10 @@ fn com_implementation_traits_preserve_declared_method_safety() {
     );
 }
 
+fn abi_name(abi: Option<&syn::Abi>) -> String {
+    abi.unwrap().name.as_ref().unwrap().value()
+}
+
 #[test]
 fn method_convention_override_matches_the_vtable_field_and_shim() {
     for convention in [
@@ -335,51 +346,92 @@ fn method_convention_override_matches_the_vtable_field_and_shim() {
         .unwrap();
         let file: syn::File =
             syn::parse2(super::expand_native(quote! { abi = c }, &declaration).unwrap()).unwrap();
+        // An x86-only convention applies on x86 and lowers to "C" in the second version.
+        let expected: &[&str] =
+            if ["cdecl", "stdcall", "fastcall", "thiscall"].contains(&convention) {
+                &[convention, "C"]
+            } else {
+                &[convention]
+            };
+        let tables: Vec<&syn::ItemStruct> = file
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::Item::Struct(item) if item.ident == "IMixedVtbl" => Some(item),
+                _ => None,
+            })
+            .collect();
         for (method, shim) in [
             ("explicit_method", "__cppvtable_imixed_slot_1"),
             ("explicit_aggregate", "__cppvtable_imixed_slot_2"),
         ] {
-            let table = file
+            let fields: Vec<String> = tables
+                .iter()
+                .map(|table| {
+                    let field = table
+                        .fields
+                        .iter()
+                        .find(|field| field.ident.as_ref().is_some_and(|name| name == method))
+                        .unwrap();
+                    let syn::Type::FnPtr(pointer) = &field.ty else {
+                        panic!("method field must be a function pointer");
+                    };
+                    abi_name(pointer.abi.as_ref())
+                })
+                .collect();
+            assert_eq!(fields, expected, "{method} with {convention}");
+            let shims: Vec<String> = file
                 .items
                 .iter()
-                .find_map(|item| match item {
-                    syn::Item::Struct(item) if item.ident == "IMixedVtbl" => Some(item),
+                .filter_map(|item| match item {
+                    syn::Item::Fn(item) if item.sig.ident == shim => {
+                        Some(abi_name(item.sig.abi.as_ref()))
+                    }
                     _ => None,
                 })
-                .unwrap();
+                .collect();
+            assert_eq!(shims, expected, "{shim} with {convention}");
+        }
+        for table in &tables {
             let field = table
                 .fields
                 .iter()
-                .find(|field| field.ident.as_ref().is_some_and(|name| name == method))
+                .find(|field| {
+                    field
+                        .ident
+                        .as_ref()
+                        .is_some_and(|name| name == "default_method")
+                })
                 .unwrap();
             let syn::Type::FnPtr(pointer) = &field.ty else {
                 panic!("method field must be a function pointer");
             };
-            assert_eq!(
-                pointer.abi.as_ref().unwrap().name.as_ref().unwrap().value(),
-                convention
-            );
-            let shim = file
-                .items
-                .iter()
-                .find_map(|item| match item {
-                    syn::Item::Fn(item) if item.sig.ident == shim => Some(item),
-                    _ => None,
-                })
-                .unwrap();
-            assert_eq!(
-                shim.sig
-                    .abi
-                    .as_ref()
-                    .unwrap()
-                    .name
-                    .as_ref()
-                    .unwrap()
-                    .value(),
-                convention
-            );
+            assert_eq!(abi_name(pointer.abi.as_ref()), "C");
         }
     }
+}
+
+#[test]
+fn x86_only_overrides_split_every_configuration_that_admits_x86() {
+    let declaration: syn::ItemTrait = syn::parse_quote! {
+        unsafe trait ISystem {
+            #[abi(convention = "stdcall")]
+            fn value(&self) -> u32;
+        }
+    };
+    let output = super::expand_native(quote! { abi = cpp }, &declaration)
+        .unwrap()
+        .to_string();
+    // MSVC x86, MSVC other, Itanium x86, Itanium other, Windows GNU x86.
+    assert_eq!(output.matches("struct ISystemVtbl").count(), 5);
+    let com = super::expand(
+        quote! { abi = com, iid = "00000000-0000-0000-C000-000000000046" },
+        &declaration,
+    )
+    .unwrap()
+    .to_string();
+    assert_eq!(com.matches("struct ISystemVtbl").count(), 2);
+    assert!(com.contains("not (target_arch = \"x86\")"));
 }
 
 #[test]
@@ -490,4 +542,236 @@ fn inline_layout_validates_layout_names_duplicates_and_base_contract() {
         .to_string();
     assert!(derived.contains("derived and base interfaces must use the same vtable layout"));
     assert!(derived.contains("an inline interface must have at least one function-pointer slot"));
+}
+
+#[test]
+fn a_declaration_must_be_an_unsafe_trait() {
+    let item: syn::ItemTrait = syn::parse_quote! { pub trait IPlain { fn value(&self) -> u32; } };
+    for error in [
+        super::expand_native(quote! { abi = c }, &item).unwrap_err(),
+        super::expand_abi(quote! { abi = cpp }, &item).unwrap_err(),
+        super::expand(
+            quote! { abi = com, iid = "00000000-0000-0000-C000-000000000046" },
+            &item,
+        )
+        .unwrap_err(),
+    ] {
+        assert!(error.to_string().contains("unsafe trait"));
+    }
+}
+
+fn has_attribute(attrs: &[syn::Attribute], name: &str) -> bool {
+    attrs.iter().any(|attr| attr.path().is_ident(name))
+}
+
+fn allows_deprecated(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        attr.path().is_ident("allow") && quote! { #attr }.to_string().contains("deprecated")
+    })
+}
+
+#[test]
+fn trait_attributes_go_to_the_interface_type() {
+    let item: syn::ItemTrait = syn::parse_quote! {
+        #[deprecated = "use IValue2"]
+        #[must_use]
+        pub unsafe trait IValue { fn value(&self) -> u32; }
+    };
+    let file: syn::File =
+        syn::parse2(super::expand_native(quote! { abi = c, extends(IBase) }, &item).unwrap())
+            .unwrap();
+    let mut impls = 0;
+    for item in &file.items {
+        match item {
+            syn::Item::Struct(item) if item.ident == "IValue" => {
+                assert!(has_attribute(&item.attrs, "deprecated"));
+                assert!(has_attribute(&item.attrs, "must_use"));
+            }
+            syn::Item::Struct(item) => assert!(!has_attribute(&item.attrs, "deprecated")),
+            syn::Item::Impl(impl_item)
+                if matches!(
+                    impl_item.self_ty.as_ref(),
+                    syn::Type::Path(ty) if ty.path.is_ident("IValue")
+                ) =>
+            {
+                assert!(
+                    allows_deprecated(&impl_item.attrs),
+                    "{}",
+                    quote! { #impl_item }
+                );
+                impls += 1;
+            }
+            _ => {}
+        }
+    }
+    // Inherent, Interface, CppInterface, Deref, Debug, PartialEq, and Eq.
+    assert_eq!(impls, 7);
+
+    for (attribute, expected) in [
+        (quote! { #[derive(Clone, Copy)] }, "cannot derive"),
+        (quote! { #[repr(C)] }, "repr(transparent)"),
+    ] {
+        let item: syn::ItemTrait = syn::parse_quote! {
+            #attribute
+            pub unsafe trait IValue { fn value(&self) -> u32; }
+        };
+        let message = super::expand_native(quote! { abi = c }, &item)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains(expected), "{message}");
+    }
+}
+
+#[test]
+fn a_trait_cfg_configures_every_generated_item() {
+    let item: syn::ItemTrait = syn::parse_quote! {
+        #[cfg(feature = "value")]
+        pub unsafe trait IValue { fn value(&self) -> u32; }
+    };
+    for output in [
+        super::expand_native(quote! { abi = cpp }, &item).unwrap(),
+        super::expand_abi(quote! { abi = c }, &item).unwrap(),
+    ] {
+        let file: syn::File = syn::parse2(output).unwrap();
+        for item in &file.items {
+            let tokens = quote! { #item }.to_string();
+            assert!(
+                tokens.starts_with("# [cfg (feature = \"value\")]"),
+                "{tokens}"
+            );
+        }
+    }
+}
+
+#[test]
+fn method_attributes_go_to_the_caller_and_the_implementation() {
+    let item: syn::ItemTrait = syn::parse_quote! {
+        pub unsafe trait IValue {
+            #[deprecated]
+            #[must_use]
+            #[allow(clippy::pedantic, reason = "Test.")]
+            fn value(&self) -> u32;
+        }
+    };
+    let file: syn::File =
+        syn::parse2(super::expand_native(quote! { abi = c }, &item).unwrap()).unwrap();
+    let forwarded = |attrs: &[syn::Attribute]| {
+        ["deprecated", "must_use", "allow"].map(|name| has_attribute(attrs, name))
+    };
+    let mut callers = 0;
+    for item in &file.items {
+        match item {
+            syn::Item::Impl(item) => {
+                for item in &item.items {
+                    if let syn::ImplItem::Fn(item) = item {
+                        if item.sig.ident == "value" {
+                            assert_eq!(forwarded(&item.attrs), [true; 3]);
+                            callers += 1;
+                        }
+                    }
+                }
+            }
+            syn::Item::Trait(item) if item.ident == "IValueImpl" => {
+                let syn::TraitItem::Fn(method) = &item.items[0] else {
+                    panic!("the implementation trait holds the method");
+                };
+                assert_eq!(forwarded(&method.attrs), [true; 3]);
+            }
+            syn::Item::Fn(item) if item.sig.ident == "__cppvtable_ivalue_slot_0" => {
+                assert!(allows_deprecated(&item.attrs));
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(callers, 1);
+
+    let configured: syn::ItemTrait = syn::parse_quote! {
+        pub unsafe trait IValue {
+            #[cfg(windows)]
+            fn value(&self) -> u32;
+        }
+    };
+    assert!(
+        super::expand_native(quote! { abi = c }, &configured)
+            .unwrap_err()
+            .to_string()
+            .contains("shift the slots")
+    );
+}
+
+fn inherent_methods(output: TokenStream, name: &str) -> Vec<syn::ImplItemFn> {
+    let file: syn::File = syn::parse2(output).unwrap();
+    file.items
+        .into_iter()
+        .filter_map(|item| match item {
+            syn::Item::Impl(item) if item.trait_.is_none() => Some(item),
+            _ => None,
+        })
+        .filter(
+            |item| matches!(item.self_ty.as_ref(), syn::Type::Path(ty) if ty.path.is_ident(name)),
+        )
+        .flat_map(|item| item.items)
+        .filter_map(|item| match item {
+            syn::ImplItem::Fn(item) => Some(item),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_interface_type_borrows_and_hooks_through_its_contract() {
+    let item: syn::ItemTrait =
+        syn::parse_quote! { pub unsafe trait IValue { fn value(&self) -> u32; } };
+    let names = |output: TokenStream| -> Vec<String> {
+        inherent_methods(output, "IValue")
+            .iter()
+            .map(|method| method.sig.ident.to_string())
+            .collect()
+    };
+    let native = names(super::expand_native(quote! { abi = cpp }, &item).unwrap());
+    assert_eq!(
+        native
+            .iter()
+            .filter(|name| *name != "value")
+            .collect::<Vec<_>>(),
+        ["as_raw", "from_raw", "from_non_null", "vtable", "hook"]
+    );
+    for output in [
+        super::expand_native(quote! { abi = c, layout = inline }, &item).unwrap(),
+        super::expand_abi(quote! { abi = cpp }, &item).unwrap(),
+        super::expand(
+            quote! { abi = com, iid = "00000000-0000-0000-C000-000000000046" },
+            &item,
+        )
+        .unwrap(),
+    ] {
+        assert!(!names(output).contains(&"hook".to_owned()));
+    }
+
+    let methods = inherent_methods(
+        super::expand_native(quote! { abi = c }, &item).unwrap(),
+        "IValue",
+    );
+    let signature = |name: &str| {
+        let method = methods
+            .iter()
+            .find(|method| method.sig.ident == name)
+            .unwrap();
+        let signature = &method.sig;
+        quote! { #signature }.to_string()
+    };
+    assert!(
+        signature("from_raw").contains("Option < :: cppvtable :: InterfaceRef < 'a , Self > >")
+    );
+    assert!(signature("from_non_null").contains("-> :: cppvtable :: InterfaceRef < 'a , Self >"));
+    assert!(signature("vtable").contains("-> & IValueVtbl"));
+    assert!(!signature("vtable").contains("unsafe"));
+
+    let abi = super::expand_abi(quote! { abi = c }, &item)
+        .unwrap()
+        .to_string();
+    assert!(abi.contains("struct IValue (:: cppvtable_abi :: RawInterface) ;"));
+    assert!(abi.contains("impl :: core :: fmt :: Debug for IValue"));
+    assert!(abi.contains("\"IValue({:p})\""));
+    assert!(abi.contains("impl :: core :: cmp :: Eq for IValue"));
 }

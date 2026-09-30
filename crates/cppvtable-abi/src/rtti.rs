@@ -1,8 +1,10 @@
 //! Inspection of compiler-produced C++ RTTI and optional native cast adapters.
 //!
 //! This module borrows native type descriptors and hierarchy information. It does not
-//! invent C++ type identities or require linking a C++ runtime. Runtime cast functions
-//! can be supplied explicitly when casts beyond complete-object recovery are needed.
+//! invent C++ type identities or, by default, require linking a C++ runtime. Runtime
+//! cast functions can be supplied explicitly when casts beyond complete-object
+//! recovery are needed, or taken from the target runtime with the opt-in
+//! `native-dynamic-cast` feature.
 //! Extracted layout, hierarchy, and raw-name fields are treated like C++ `type_info`:
 //! static storage that stays loaded while in use. Module unloading is not modeled.
 //! Independent native demangling caches are never read.
@@ -22,6 +24,8 @@
 use core::ffi::{CStr, c_char, c_void};
 use core::mem::size_of;
 
+use crate::interface::{Interface, VtableLayout, raw_of};
+
 /// The C++ object ABI used by native RTTI metadata.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CppAbi {
@@ -29,6 +33,16 @@ pub enum CppAbi {
     Msvc,
     /// Itanium C++ ABI family, including Clang's relative-table representation.
     Itanium,
+}
+
+impl CppAbi {
+    /// The C++ ABI of the compilation target: [`Self::Msvc`] for `target_env = "msvc"`
+    /// and [`Self::Itanium`] otherwise, including windows-gnu.
+    pub const TARGET: Self = if cfg!(target_env = "msvc") {
+        Self::Msvc
+    } else {
+        Self::Itanium
+    };
 }
 
 /// Physical RTTI representation; this cannot always be inferred from the ABI family.
@@ -160,6 +174,30 @@ unsafe impl Send for RttiMetadata {}
 unsafe impl Sync for RttiMetadata {}
 
 impl RttiMetadata {
+    /// Extract RTTI from a C++ interface using its declared ABI's ordinary defaults.
+    ///
+    /// This is [`Self::from_interface`] with `I::CPP_ABI`. Naming a C or COM
+    /// interface, or an inline-layout interface, is a compile-time error.
+    ///
+    /// # Safety
+    ///
+    /// `iface` must satisfy the object contract of [`Self::from_interface`].
+    #[must_use]
+    pub unsafe fn of<I: Interface>(iface: &I) -> Self {
+        let abi = const {
+            assert!(
+                matches!(I::LAYOUT, VtableLayout::Pointer),
+                "RTTI requires a pointer-layout interface"
+            );
+            match I::CPP_ABI {
+                Some(abi) => abi,
+                None => panic!("RTTI requires a C++ interface"),
+            }
+        };
+        // SAFETY: The caller upholds `from_interface` for this interface's ABI.
+        unsafe { Self::from_interface(abi, raw_of(iface)) }
+    }
+
     /// Extract RTTI from a native interface using its family's ordinary defaults.
     ///
     /// Itanium selects pointer-sized components, with Apple arm64 tagged names on
@@ -686,8 +724,12 @@ pub type MsvcDynamicCast = unsafe extern "C" fn(
     is_reference: i32,
 ) -> *mut c_void;
 
-/// Explicit native runtime adapter; constructing it does not link any runtime symbol.
-#[derive(Clone, Copy)]
+/// Explicit native runtime adapter; constructing one from a function does not link any
+/// runtime symbol.
+///
+/// With the opt-in `native-dynamic-cast` feature, [`Self::TARGET`] uses the target C++
+/// runtime's own cast.
+#[derive(Clone, Copy, Debug)]
 pub enum DynamicCastRuntime {
     /// Native Itanium `__dynamic_cast`, or a compatible nonthrowing wrapper.
     Itanium(ItaniumDynamicCast),
@@ -696,6 +738,20 @@ pub enum DynamicCastRuntime {
 }
 
 impl DynamicCastRuntime {
+    /// The target C++ runtime's pointer cast for [`CppAbi::TARGET`] objects.
+    ///
+    /// Itanium targets call `__dynamic_cast`, which does not throw. Microsoft targets
+    /// call `__RTDynamicCast` with pointer semantics through a non-unwinding wrapper:
+    /// an exception escaping the runtime, such as `std::__non_rtti_object` for an
+    /// object without RTTI, aborts the process.
+    ///
+    /// The final link must include the target's C++ runtime: `vcruntime` on Microsoft
+    /// targets, which Rust's standard library already links, and the C++ ABI library
+    /// (`libstdc++` or `libc++abi`) on Itanium targets, which crates building C++
+    /// with the `cc` crate link.
+    #[cfg(feature = "native-dynamic-cast")]
+    pub const TARGET: Self = native::TARGET;
+
     /// The ABI of the supplied cast function.
     #[must_use]
     pub const fn abi(self) -> CppAbi {
@@ -737,6 +793,73 @@ impl DynamicCastRuntime {
             Self::Msvc(function) => unsafe { function(object, 0, source_type, target_type, 0) },
         }
     }
+}
+
+/// Declarations of the target C++ runtime's pointer `dynamic_cast` entry points.
+#[cfg(feature = "native-dynamic-cast")]
+mod native {
+    use super::DynamicCastRuntime;
+    use core::ffi::c_void;
+
+    #[cfg(target_env = "msvc")]
+    unsafe extern "C-unwind" {
+        /// `void* __RTDynamicCast(void* inptr, long VfDelta, void* SrcType,
+        /// void* TargetType, int isReference)`; it may throw.
+        #[link_name = "__RTDynamicCast"]
+        fn rt_dynamic_cast(
+            inptr: *mut c_void,
+            vf_delta: core::ffi::c_long,
+            src_type: *mut c_void,
+            target_type: *mut c_void,
+            is_reference: core::ffi::c_int,
+        ) -> *mut c_void;
+    }
+
+    /// Call `__RTDynamicCast`; this non-unwinding boundary turns an escaping C++
+    /// exception into an abort.
+    ///
+    /// # Safety
+    ///
+    /// See [`DynamicCastRuntime::cast`].
+    #[cfg(target_env = "msvc")]
+    unsafe extern "C" fn msvc_cast(
+        object: *mut c_void,
+        vfptr_delta: i32,
+        source_type: *const c_void,
+        target_type: *const c_void,
+        is_reference: i32,
+    ) -> *mut c_void {
+        // SAFETY: The caller upholds `DynamicCastRuntime::cast`; the runtime only reads
+        // the type descriptors, so passing them as mutable pointers is sound.
+        unsafe {
+            rt_dynamic_cast(
+                object,
+                vfptr_delta,
+                source_type.cast_mut(),
+                target_type.cast_mut(),
+                is_reference,
+            )
+        }
+    }
+
+    #[cfg(target_env = "msvc")]
+    pub(super) const TARGET: DynamicCastRuntime = DynamicCastRuntime::Msvc(msvc_cast);
+
+    #[cfg(not(target_env = "msvc"))]
+    unsafe extern "C" {
+        /// `void* __dynamic_cast(const void* src_ptr, const __class_type_info* src_type,
+        /// const __class_type_info* dst_type, std::ptrdiff_t src2dst)`.
+        #[link_name = "__dynamic_cast"]
+        fn dynamic_cast(
+            src_ptr: *const c_void,
+            src_type: *const c_void,
+            dst_type: *const c_void,
+            src2dst: isize,
+        ) -> *mut c_void;
+    }
+
+    #[cfg(not(target_env = "msvc"))]
+    pub(super) const TARGET: DynamicCastRuntime = DynamicCastRuntime::Itanium(dynamic_cast);
 }
 
 #[cfg(test)]

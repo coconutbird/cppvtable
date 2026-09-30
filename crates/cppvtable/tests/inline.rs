@@ -5,7 +5,13 @@ use core::mem::{align_of, offset_of, size_of};
 use std::cell::Cell;
 use std::rc::Rc;
 
-use cppvtable::{Object, OwnedObject, implement, interface, interface_of, raw_of, vtable_of};
+use cppvtable::{Object, OwnedObject, implement, interface, interface_of};
+use cppvtable_abi::interface::{raw_of, vtable_of};
+
+/// The address a view's vtable reference points at.
+fn table_address<T>(table: &T) -> *mut c_void {
+    core::ptr::from_ref(table).cast::<c_void>().cast_mut()
+}
 
 #[interface(abi = c, layout = inline, slots = 3)]
 unsafe trait IInlineBase {
@@ -57,7 +63,7 @@ impl IPointerImpl for InlineFirst {
 
     unsafe fn inline_identity(&self) -> *mut c_void {
         // SAFETY: The method contract requires an implementation embedded in `Object`.
-        unsafe { interface_of::<Self, IInlineDerived>(self) }
+        unsafe { interface_of::<IInlineDerived>(self) }.as_raw()
     }
 }
 
@@ -91,7 +97,7 @@ impl IPointerImpl for PointerFirst {
 
     unsafe fn inline_identity(&self) -> *mut c_void {
         // SAFETY: The method contract requires an implementation embedded in `Object`.
-        unsafe { interface_of::<Self, IInlineDerived>(self) }
+        unsafe { interface_of::<IInlineDerived>(self) }.as_raw()
     }
 }
 
@@ -108,25 +114,21 @@ fn inherited_partial_inline_table_is_the_interface_header() {
         drops: Rc::new(Cell::new(0)),
     });
     let inline = owner.interface::<IInlineDerived>();
-    let base = owner.query_interface::<IInlineBase>().unwrap();
-    assert_eq!(inline.vtable().cast::<c_void>().cast_mut(), inline.as_raw());
-    assert_eq!(vtable_of(&*inline), inline.vtable());
+    let base = owner.try_interface::<IInlineBase>().unwrap();
+    assert_eq!(table_address(inline.vtable()), inline.as_raw());
+    assert!(core::ptr::eq(vtable_of(&*inline), inline.vtable()));
     assert_eq!(raw_of(&*inline), inline.as_raw());
     assert_eq!(base.as_raw(), inline.as_raw());
-    assert_eq!(base.vtable().cast::<c_void>().cast_mut(), base.as_raw());
+    assert_eq!(table_address(base.vtable()), base.as_raw());
 
-    // SAFETY: The owner keeps the header and Rust value alive. All called slots are
-    // declared methods; the reserved entries are only inspected.
-    unsafe {
-        assert_eq!(inline.value(), 17);
-        assert_eq!(inline.add(3), 20);
-        assert_eq!(base.value(), 17);
-        let header = &*inline.vtable();
-        assert!(header.base.reserved_0.is_none());
-        assert!(header.base.__reserved_tail.iter().all(Option::is_none));
-        assert!(header.reserved_0.is_none());
-        assert!(header.__reserved_tail.iter().all(Option::is_none));
-    }
+    assert_eq!(inline.value(), 17);
+    assert_eq!(inline.add(3), 20);
+    assert_eq!(base.value(), 17);
+    let header = inline.vtable();
+    assert!(header.base.reserved_0.is_none());
+    assert!(header.base.__reserved_tail.iter().all(Option::is_none));
+    assert!(header.reserved_0.is_none());
+    assert!(header.__reserved_tail.iter().all(Option::is_none));
 }
 
 #[test]
@@ -154,27 +156,21 @@ fn pointer_and_inline_chains_adjust_to_the_same_value_in_either_order() {
         other_inline.as_raw() as usize - other_pointer.as_raw() as usize,
         size_of::<usize>()
     );
-    assert_ne!(
-        pointer.vtable().cast::<c_void>().cast_mut(),
-        pointer.as_raw()
-    );
-    assert_eq!(
-        other_inline.vtable().cast::<c_void>().cast_mut(),
-        other_inline.as_raw()
-    );
+    assert_ne!(table_address(pointer.vtable()), pointer.as_raw());
+    assert_eq!(table_address(other_inline.vtable()), other_inline.as_raw());
 
     // SAFETY: Both owners remain alive, and each shim supplies its implementation
     // from the allocation, as `inline_identity` requires.
     unsafe {
         assert_eq!(pointer.inline_identity(), inline.as_raw());
         assert_eq!(other_pointer.inline_identity(), other_inline.as_raw());
-        pointer.set(40);
-        other_pointer.set(80);
-        assert_eq!(inline.value(), 40);
-        assert_eq!(inline.add(2), 42);
-        assert_eq!(other_inline.value(), 80);
-        assert_eq!(other_inline.add(2), 82);
     }
+    pointer.set(40);
+    other_pointer.set(80);
+    assert_eq!(inline.value(), 40);
+    assert_eq!(inline.add(2), 42);
+    assert_eq!(other_inline.value(), 80);
+    assert_eq!(other_inline.add(2), 82);
 }
 
 #[test]
@@ -185,7 +181,7 @@ fn aligned_inline_data_survives_ownership_transfer_and_drops_once() {
         drops: Rc::clone(&drops),
     });
     assert_eq!(align_of::<InlineFirst>(), 64);
-    assert_eq!(core::ptr::from_ref(owner.get()) as usize % 64, 0);
+    assert_eq!(core::ptr::from_ref::<InlineFirst>(&owner) as usize % 64, 0);
     let inline = owner.as_raw::<IInlineDerived>();
     let pointer = owner.as_raw::<IPointer>();
     let moved = Box::new(owner);
@@ -196,9 +192,11 @@ fn aligned_inline_data_survives_ownership_transfer_and_drops_once() {
     assert_eq!(drops.get(), 0);
     // SAFETY: `raw` uniquely owns the allocation relinquished above.
     let restored = unsafe { OwnedObject::from_raw(raw) };
-    assert_eq!(core::ptr::from_ref(restored.get()) as usize % 64, 0);
-    // SAFETY: The restored owner keeps the inline header and value alive.
-    assert_eq!(unsafe { restored.interface::<IInlineDerived>().add(1) }, 42);
+    assert_eq!(
+        core::ptr::from_ref::<InlineFirst>(&restored) as usize % 64,
+        0
+    );
+    assert_eq!(restored.interface::<IInlineDerived>().add(1), 42);
     drop(restored);
     assert_eq!(drops.get(), 1);
 }
@@ -228,8 +226,7 @@ fn borrowed_foreign_inline_table_calls_its_embedded_function_entry() {
     let raw = core::ptr::from_mut(&mut foreign).cast::<c_void>();
     // SAFETY: `raw` identifies this immutable header, which remains alive throughout
     // the borrow, together with the data accessed by its callback.
-    let view = unsafe { IForeignInline::from_raw_ref(&raw) };
-    assert_eq!(view.vtable().cast::<c_void>().cast_mut(), raw);
-    // SAFETY: The containing foreign fixture stays alive and the method has no arguments.
-    assert_eq!(unsafe { view.read() }, 42);
+    let view = unsafe { IForeignInline::from_raw(raw) }.unwrap();
+    assert_eq!(table_address(view.vtable()), raw);
+    assert_eq!(view.read(), 42);
 }

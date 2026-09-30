@@ -147,8 +147,7 @@ fn many_threads_add_and_remove_public_references() {
             scope.spawn(move || {
                 for _ in 0..ROUNDS {
                     let extra = thread_copy.clone();
-                    // SAFETY: This thread owns a public reference.
-                    assert_eq!(unsafe { extra.Value() }, 1);
+                    assert_eq!(extra.Value(), 1);
                     drop(extra);
                 }
             });
@@ -184,8 +183,7 @@ fn many_threads_bring_an_object_back_from_public_count_zero() {
                     // `GetTexture` from more than one thread. Each call brings the
                     // public count up, and the last release brings it down again.
                     let public: ComPtr<IStress> = thread_copy.to_public();
-                    // SAFETY: This thread owns a public reference.
-                    assert_eq!(unsafe { public.Value() }, 2);
+                    assert_eq!(public.Value(), 2);
                     drop(public);
                 }
             });

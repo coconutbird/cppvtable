@@ -3,6 +3,7 @@
 use core::ffi::c_void;
 
 use crate::hresult::HRESULT;
+use crate::ptr::ComPtr;
 use crate::{GUID, Interface};
 
 /// A binary interface with COM's `IUnknown` and `QueryInterface` semantics.
@@ -131,4 +132,56 @@ pub unsafe trait IUnknown {
     /// An owning Rust handle must relinquish that reference before this call so its
     /// destructor does not release it again.
     unsafe fn Release(&self) -> u32;
+}
+
+impl IUnknown {
+    /// Ask the object for another interface and own the answer.
+    ///
+    /// The method calls `QueryInterface` and gives `None` when the object does not have
+    /// the requested interface. The result owns the public reference that
+    /// `QueryInterface` added.
+    ///
+    /// Every COM interface derefs to its base and finally to `IUnknown`, so the method
+    /// is available on each interface, on a borrowed [`crate::InterfaceRef`], and on a
+    /// [`ComPtr`]:
+    ///
+    /// ```
+    /// use cppvtable_com::{ComObject, ComPtr, IUnknown, implement, interface};
+    ///
+    /// #[interface(abi = com, iid = "c0640005-0000-4000-8000-000000000005")]
+    /// unsafe trait IFirst {
+    ///     fn First(&self) -> u32;
+    /// }
+    /// #[interface(abi = com, iid = "c0640006-0000-4000-8000-000000000006")]
+    /// unsafe trait ISecond {
+    ///     fn Second(&self) -> u32;
+    /// }
+    /// #[implement(IFirst, ISecond, refcount = single)]
+    /// struct Both;
+    /// impl IFirstImpl for Both {
+    ///     fn First(&self) -> u32 { 1 }
+    /// }
+    /// impl ISecondImpl for Both {
+    ///     fn Second(&self) -> u32 { 2 }
+    /// }
+    ///
+    /// let first: ComPtr<IFirst> = ComObject::new(Both);
+    /// let second = first.cast::<ISecond>().unwrap();
+    /// assert_eq!(second.Second(), 2);
+    /// assert!(first.cast::<IUnknown>().is_some());
+    /// ```
+    #[must_use]
+    pub fn cast<J: ComInterface>(&self) -> Option<ComPtr<J>> {
+        let iid = J::IID;
+        let mut out: *mut c_void = core::ptr::null_mut();
+        // SAFETY: An `IUnknown` value exists only for a live COM interface pointer, and
+        // the borrow keeps the object alive. Both arguments refer to local values.
+        let result = unsafe { self.QueryInterface(&raw const iid, &raw mut out) };
+        if result.is_err() {
+            return None;
+        }
+        // SAFETY: On success `QueryInterface` wrote an interface pointer of `J` and added
+        // the public reference that the `ComPtr` owns.
+        unsafe { ComPtr::from_raw(out) }
+    }
 }

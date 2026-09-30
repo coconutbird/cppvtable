@@ -4,36 +4,31 @@
 //! patch hook stacked on a shadow-hooked object overwrites that object's copy.
 
 use super::*;
-use cppvtable::hook::{HookMode, VtableHook};
+use cppvtable::hook::HookMode;
+use cppvtable::interface;
 use cppvtable::rtti::RttiMetadata;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::OnceLock;
 
-static ORIGINAL_ROOT: AtomicPtr<c_void> = AtomicPtr::new(core::ptr::null_mut());
-
-macro_rules! member {
-    ($(fn $name:ident($this:ident: *mut c_void) -> i32 $body:block)*) => {$(
-        #[cfg(all(target_arch = "x86", target_os = "windows"))]
-        unsafe extern "thiscall" fn $name($this: *mut c_void) -> i32 $body
-        #[cfg(not(all(target_arch = "x86", target_os = "windows")))]
-        unsafe extern "C" fn $name($this: *mut c_void) -> i32 $body
-    )*};
+/// The primary chain of `CppvtableRttiWitness`, flattened to its two entries.
+#[interface(abi = cpp)]
+unsafe trait IWitness {
+    fn root_value(&self) -> i32;
+    fn derived_value(&self) -> i32;
 }
 
-#[cfg(all(target_arch = "x86", target_os = "windows"))]
-type Method = unsafe extern "thiscall" fn(*mut c_void) -> i32;
-#[cfg(not(all(target_arch = "x86", target_os = "windows")))]
-type Method = unsafe extern "C" fn(*mut c_void) -> i32;
+/// The native Witness table, captured before hooking for forwarding.
+static ORIGINAL: OnceLock<IWitnessVtbl> = OnceLock::new();
 
-member! {
-    fn hooked_root(this: *mut c_void) -> i32 {
-        // SAFETY: The stored entry is the native `root_value` with this signature.
-        let original: Method = unsafe { core::mem::transmute(ORIGINAL_ROOT.load(Ordering::Relaxed)) };
-        // SAFETY: `this` is the hooked live object passed by the native caller.
-        unsafe { original(this) + 100 }
-    }
-    fn patched_derived(_this: *mut c_void) -> i32 {
-        -1
-    }
+#[cppvtable::vtable_fn(abi = cpp)]
+unsafe fn hooked_root(this: *mut c_void) -> i32 {
+    let original = ORIGINAL.get().expect("captured before hooking").root_value;
+    // SAFETY: `original` is the native `root_value` of the live Witness `this`.
+    unsafe { original(this) + 100 }
+}
+
+#[cppvtable::vtable_fn(abi = cpp)]
+unsafe fn patched_derived(_this: *mut c_void) -> i32 {
+    -1
 }
 
 /// # Safety
@@ -65,30 +60,35 @@ fn stacked_hooks_affect_one_object_and_keep_native_rtti() {
     let other = create_native(Class::Witness);
     // SAFETY: Both Witness objects stay alive until deleted below, after both hooks
     // drop in reverse order. Witness's primary table has exactly `root_value` and
-    // `derived_value`, which the hooks implement with the native signature. The
-    // patched table is the writable shadow copy. No other thread touches these objects.
+    // `derived_value`, which the replacements implement with the declared signature.
+    // The patched table is the writable shadow copy. No other thread touches these
+    // objects, and no table borrow is held across an edit.
     unsafe {
-        let metadata = RttiMetadata::from_interface(ABI, hooked.root);
-        let mut shadow = VtableHook::new(hooked.root, metadata.prefix_size(), 2, HookMode::Shadow);
-        ORIGINAL_ROOT.store(shadow.original(0).cast_mut(), Ordering::Relaxed);
-        let _ = shadow.replace(0, hooked_root as *const c_void);
+        let root = IWitness::from_raw(hooked.root).expect("factory allocation succeeded");
+        let table = |iface: &IWitness| std::ptr::from_ref(iface.vtable());
+
+        let mut shadow = root.hook(HookMode::Shadow);
+        ORIGINAL.get_or_init(|| *shadow.original());
+        shadow.set(|t| t.root_value = hooked_root);
+        let shadow_table = table(&root);
         assert_eq!(values(hooked.root), (111, 22));
         assert_eq!(values(other.root), (11, 22));
         assert!(rtti_intact(hooked.root, hooked.secondary));
         assert_eq!(
-            RttiMetadata::from_interface(ABI, hooked.root).type_info(),
+            RttiMetadata::of(&*root).type_info(),
             type_descriptor(Class::Witness)
         );
 
-        let mut patch = VtableHook::new(hooked.root, metadata.prefix_size(), 2, HookMode::Patch);
-        assert_eq!(patch.address_point(), shadow.address_point());
-        let _ = patch.replace(1, patched_derived as *const c_void);
+        let mut patch = root.hook(HookMode::Patch);
+        patch.set(|t| t.derived_value = patched_derived);
+        assert_eq!(table(&root), shadow_table);
         assert_eq!(values(hooked.root), (111, -1));
         assert_eq!(values(other.root), (11, 22));
         drop(patch);
         assert_eq!(values(hooked.root), (111, 22));
 
         drop(shadow);
+        assert_ne!(table(&root), shadow_table);
         assert_eq!(values(hooked.root), (11, 22));
         assert_eq!(values(other.root), (11, 22));
         assert!(rtti_intact(hooked.root, hooked.secondary));

@@ -10,15 +10,19 @@
 //!   and includes `IUnknown` behavior.
 //! - `impl Implements<IFoo> for Foo` with the index of the vtable pointer. The index is
 //!   the `this` adjustment of the chain.
+//! - With `refcount = single` or `refcount = dual` (COM only), `impl RefCounted for Foo`
+//!   with that policy and the default hooks, plus a compile-time check that `Foo` is
+//!   `Send + Sync` when an implemented interface or one of its bases is an
+//!   `AgileInterface`.
 //!
-//! The struct itself goes out without a change.
+//! The struct itself goes out without a change. Named, tuple, and unit structures work.
 
-use proc_macro2::{Literal, TokenStream};
+use proc_macro2::{Literal, Span, TokenStream};
 use quote::{format_ident, quote};
+use syn::ItemStruct;
 use syn::spanned::Spanned;
-use syn::{Fields, ItemStruct};
 
-use crate::parse::{ImplementArgs, Runtime, derived_name, derived_path, static_name};
+use crate::parse::{ImplementArgs, RefCount, Runtime, derived_name, derived_path, static_name};
 
 /// Expand `#[implement(...)]` for the standalone COM runtime package.
 pub(crate) fn expand(args: TokenStream, item: &ItemStruct) -> Result<TokenStream, syn::Error> {
@@ -46,10 +50,10 @@ fn expand_with_runtime(
              a lifetime. The static vtables need one fixed type.",
         ));
     }
-    if matches!(item.fields, Fields::Unnamed(_)) {
+    if args.refcount.is_some() && matches!(runtime, Runtime::Native) {
         return Err(syn::Error::new(
-            item.fields.span(),
-            "use a structure with named fields or a unit structure",
+            Span::call_site(),
+            "refcount is a COM option; ordinary objects are owned by `OwnedObject`",
         ));
     }
     Ok(generate(&args, item, runtime))
@@ -94,37 +98,7 @@ fn generate(args: &ImplementArgs, item: &ItemStruct, runtime: Runtime) -> TokenS
         }
     });
 
-    let lookup = args.interfaces.iter().enumerate().map(|(slot, interface)| {
-        let index = Literal::usize_unsuffixed(slot);
-        if is_plain {
-            quote! {
-                if <#interface as #krate::CppInterface>::matches_type(id) {
-                    return ::core::option::Option::Some(#index);
-                }
-            }
-        } else {
-            quote! {
-                if #krate::interface_matches::<#interface>(iid) {
-                    return ::core::option::Option::Some(#index);
-                }
-            }
-        }
-    });
-    let lookup_method = if is_plain {
-        quote! {
-            fn slot_for_type(id: ::core::any::TypeId) -> ::core::option::Option<usize> {
-                #(#lookup)*
-                ::core::option::Option::None
-            }
-        }
-    } else {
-        quote! {
-            fn slot_for_iid(iid: &#krate::GUID) -> ::core::option::Option<usize> {
-                #(#lookup)*
-                ::core::option::Option::None
-            }
-        }
-    };
+    let lookup_method = lookup_method(args, &krate, is_plain);
 
     let implements = args.interfaces.iter().enumerate().map(|(slot, interface)| {
         let index = Literal::usize_unsuffixed(slot);
@@ -138,6 +112,9 @@ fn generate(args: &ImplementArgs, item: &ItemStruct, runtime: Runtime) -> TokenS
     let primary = &args.interfaces[0];
     let (storage_declaration, storage_type, storage_value, slot_offsets) =
         storage_plan(args, item, &krate, &abi_krate, is_plain);
+    let refcount = args
+        .refcount
+        .map(|policy| refcounted(args, name, &krate, policy));
     let table_doc = format!(
         "The addresses of the static vtables of `{name_text}`. The order is the order of \
          the `#[implement]` list."
@@ -169,6 +146,98 @@ fn generate(args: &ImplementArgs, item: &ItemStruct, runtime: Runtime) -> TokenS
         }
 
         #(#implements)*
+        #refcount
+    }
+}
+
+/// Make the method that maps an interface identity to the index of its vtable pointer.
+fn lookup_method(args: &ImplementArgs, krate: &TokenStream, is_plain: bool) -> TokenStream {
+    let lookup = args.interfaces.iter().enumerate().map(|(slot, interface)| {
+        let index = Literal::usize_unsuffixed(slot);
+        if is_plain {
+            quote! {
+                if <#interface as #krate::CppInterface>::matches_type(id) {
+                    return ::core::option::Option::Some(#index);
+                }
+            }
+        } else {
+            quote! {
+                if #krate::interface_matches::<#interface>(iid) {
+                    return ::core::option::Option::Some(#index);
+                }
+            }
+        }
+    });
+    if is_plain {
+        quote! {
+            fn slot_for_type(id: ::core::any::TypeId) -> ::core::option::Option<usize> {
+                #(#lookup)*
+                ::core::option::Option::None
+            }
+        }
+    } else {
+        quote! {
+            fn slot_for_iid(iid: &#krate::GUID) -> ::core::option::Option<usize> {
+                #(#lookup)*
+                ::core::option::Option::None
+            }
+        }
+    }
+}
+
+/// Implement `RefCounted` with a standard policy and the default hooks.
+///
+/// The default hooks return no pointers and do not touch the count, so the remaining
+/// obligation of `RefCounted` is `Send + Sync` for an object behind an
+/// `AgileInterface`. Each implemented interface is probed by method resolution: the
+/// probe method of the first agile interface along the `Deref` chain from that
+/// interface to `IUnknown` requires `Send + Sync`, and only `IUnknown` supplies the
+/// unconstrained fallback. The probe is type-checked and never runs.
+fn refcounted(
+    args: &ImplementArgs,
+    name: &syn::Ident,
+    krate: &TokenStream,
+    policy: RefCount,
+) -> TokenStream {
+    let policy = match policy {
+        RefCount::Single => quote! { #krate::SingleRefCount },
+        RefCount::Dual => quote! { #krate::DualRefCount },
+    };
+    let interfaces = &args.interfaces;
+    quote! {
+        unsafe impl #krate::RefCounted for #name {
+            type Policy = #policy;
+        }
+
+        const _: () = {
+            trait AgileInterfaceRequiresSendSync {
+                fn agile_interface_requires_send_sync<T>(
+                    &self,
+                    _object: ::core::marker::PhantomData<T>,
+                ) where
+                    T: ::core::marker::Send + ::core::marker::Sync,
+                {
+                }
+            }
+            impl<I: #krate::AgileInterface> AgileInterfaceRequiresSendSync for I {}
+
+            trait NoAgileInterface {
+                fn agile_interface_requires_send_sync<T>(
+                    &self,
+                    _object: ::core::marker::PhantomData<T>,
+                ) {
+                }
+            }
+            impl NoAgileInterface for #krate::IUnknown {}
+
+            #(
+                let _ = |interface: &#interfaces| {
+                    interface.agile_interface_requires_send_sync(
+                        ::core::marker::PhantomData::<#name>,
+                    );
+                };
+            )*
+        };
     }
 }
 
@@ -251,7 +320,60 @@ mod tests {
                 .contains("generic parameter")
         );
         assert!(
-            expand_err(quote! { IFoo }, quote! { struct Thing(u32); }).contains("named fields")
+            expand_err(
+                quote! { IFoo, refcount = forward },
+                quote! { struct Thing; }
+            )
+            .contains("`single` or `dual`")
         );
+        assert!(
+            expand_err(
+                quote! { IFoo, refcount = single, refcount = dual },
+                quote! { struct Thing; }
+            )
+            .contains("only once")
+        );
+        let native = super::expand_native(
+            quote! { IFoo, refcount = single },
+            &syn::parse_quote! { struct Thing; },
+        );
+        assert!(native.unwrap_err().to_string().contains("COM option"));
+    }
+
+    #[test]
+    fn tuple_structures_are_implementable() {
+        for expand in [super::expand, super::expand_native] {
+            let output = expand(quote! { IFoo }, &syn::parse_quote! { struct Thing(u32); })
+                .unwrap()
+                .to_string();
+            assert!(output.contains("struct Thing (u32) ;"));
+            assert!(output.contains("Implements < IFoo > for Thing"));
+        }
+    }
+
+    #[test]
+    fn refcount_writes_the_policy_and_the_agile_probe() {
+        for (argument, policy) in [
+            (quote! { single }, "SingleRefCount"),
+            (quote! { dual }, "DualRefCount"),
+        ] {
+            let output = super::expand(
+                quote! { IFoo, IBar, refcount = #argument },
+                &syn::parse_quote! { struct Thing; },
+            )
+            .unwrap()
+            .to_string();
+            assert!(output.contains(&format!(
+                "unsafe impl :: cppvtable_com :: RefCounted for Thing {{ type Policy = :: cppvtable_com :: {policy} ; }}"
+            )));
+            assert!(output.contains("impl < I : :: cppvtable_com :: AgileInterface >"));
+            assert!(output.contains("impl NoAgileInterface for :: cppvtable_com :: IUnknown"));
+            assert!(output.contains("| interface : & IFoo |"));
+            assert!(output.contains("| interface : & IBar |"));
+        }
+        let manual = super::expand(quote! { IFoo }, &syn::parse_quote! { struct Thing; })
+            .unwrap()
+            .to_string();
+        assert!(!manual.contains("RefCounted"));
     }
 }

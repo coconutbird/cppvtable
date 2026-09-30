@@ -4,6 +4,70 @@
 //! C++ callers. COM object lifetime, `IUnknown`, and `QueryInterface` are provided by
 //! `cppvtable-com`.
 //!
+//! A declaration is an `unsafe trait`. The `unsafe` is the declarer's promise that the
+//! slot order, signatures, calling conventions, and return lowering match the foreign
+//! header, that every method declared as a safe `fn` has no precondition beyond a live
+//! object, and that no method unwinds. Borrowing a foreign pointer is the single unsafe
+//! step; safe methods are then called without `unsafe`:
+//!
+//! ```
+//! use core::ffi::c_void;
+//!
+//! #[cppvtable_abi::interface(abi = c)]
+//! pub unsafe trait ICounter {
+//!     fn value(&self) -> u32;
+//! }
+//!
+//! fn read(raw: *mut c_void) -> Option<u32> {
+//!     // SAFETY: The caller gives a null pointer or a live `ICounter` object.
+//!     let counter = unsafe { ICounter::from_raw(raw) }?;
+//!     Some(counter.value())
+//! }
+//! # assert_eq!(read(core::ptr::null_mut()), None);
+//! ```
+//!
+//! A declaration without `unsafe` is rejected:
+//!
+//! ```compile_fail
+//! #[cppvtable_abi::interface(abi = c)]
+//! pub trait ICounter {
+//!     fn value(&self) -> u32;
+//! }
+//! ```
+//!
+//! An interface value cannot be copied out of its borrow:
+//!
+//! ```compile_fail,E0507
+//! #[cppvtable_abi::interface(abi = c)]
+//! pub unsafe trait ICounter {
+//!     fn value(&self) -> u32;
+//! }
+//!
+//! fn escape(counter: cppvtable_abi::InterfaceRef<'_, ICounter>) -> ICounter {
+//!     *counter
+//! }
+//! ```
+//!
+//! `#[vtable_fn(abi = ...)]` gives a free function the exact calling convention of the
+//! vtable fields of that ABI on every target, so it can be stored in a hand-built table:
+//!
+//! ```
+//! use core::ffi::c_void;
+//!
+//! #[cppvtable_abi::interface(abi = cpp)]
+//! pub unsafe trait ICounter {
+//!     fn value(&self) -> u32;
+//! }
+//!
+//! #[cppvtable_abi::vtable_fn(abi = cpp)]
+//! unsafe fn value(_this: *mut c_void) -> u32 {
+//!     7
+//! }
+//!
+//! let table = ICounterVtbl { value };
+//! # let _ = table;
+//! ```
+//!
 //! `slots` declares the total vtable extent, including inherited and reserved entries.
 //! The extent cannot end before a known method:
 //!
@@ -67,5 +131,5 @@
 pub mod interface;
 pub mod rtti;
 
-pub use cppvtable_macro::interface_abi as interface;
-pub use interface::{Interface, VtableLayout, VtablePtr, raw_of, vtable_of};
+pub use cppvtable_macro::{interface_abi as interface, vtable_fn};
+pub use interface::{Interface, InterfaceRef, RawInterface, VtableLayout, VtablePtr};

@@ -28,46 +28,6 @@ enum Class {
     Single = 10,
 }
 
-#[cfg(test)]
-const ABI: cppvtable::rtti::CppAbi = if cfg!(target_env = "msvc") {
-    cppvtable::rtti::CppAbi::Msvc
-} else {
-    cppvtable::rtti::CppAbi::Itanium
-};
-
-#[cfg(all(test, target_env = "msvc"))]
-unsafe extern "C" {
-    fn cppvtable_rtti_runtime_msvc(
-        object: *mut c_void,
-        delta: i32,
-        source: *const c_void,
-        target: *const c_void,
-        reference: i32,
-    ) -> *mut c_void;
-}
-#[cfg(all(test, not(target_env = "msvc")))]
-unsafe extern "C" {
-    fn cppvtable_rtti_runtime_itanium(
-        object: *const c_void,
-        source: *const c_void,
-        target: *const c_void,
-        hint: isize,
-    ) -> *mut c_void;
-}
-
-/// The native runtime's pointer `dynamic_cast` entry point.
-#[cfg(test)]
-fn runtime() -> cppvtable::rtti::DynamicCastRuntime {
-    #[cfg(target_env = "msvc")]
-    {
-        cppvtable::rtti::DynamicCastRuntime::Msvc(cppvtable_rtti_runtime_msvc)
-    }
-    #[cfg(not(target_env = "msvc"))]
-    {
-        cppvtable::rtti::DynamicCastRuntime::Itanium(cppvtable_rtti_runtime_itanium)
-    }
-}
-
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct NativeObject {
@@ -81,11 +41,6 @@ cpp! {{
     #include <cstdint>
     #include <new>
     #include <typeinfo>
-    #ifndef _MSC_VER
-    #include <cxxabi.h>
-    #else
-    extern "C" void* __cdecl __RTDynamicCast(void*, long, void*, void*, int) noexcept(false);
-    #endif
 
     class CppvtableRttiRoot {
     public:
@@ -152,20 +107,6 @@ cpp! {{
         object->T::~T();
         ::operator delete(object);
     }
-
-    #ifdef _MSC_VER
-    extern "C" void* cppvtable_rtti_runtime_msvc(void* object, std::int32_t delta,
-        const void* source, const void* target, std::int32_t reference) {
-        return __RTDynamicCast(object, delta, const_cast<void*>(source), const_cast<void*>(target), reference);
-    }
-    #else
-    extern "C" void* cppvtable_rtti_runtime_itanium(const void* object, const void* source,
-        const void* target, std::ptrdiff_t hint) {
-        return __cxxabiv1::__dynamic_cast(object,
-            static_cast<const __cxxabiv1::__class_type_info*>(source),
-            static_cast<const __cxxabiv1::__class_type_info*>(target), hint);
-    }
-    #endif
 }}
 
 /// Construct a concrete fixture class; release it with [`delete_native`].

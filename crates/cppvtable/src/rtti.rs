@@ -9,7 +9,9 @@
 
 pub use cppvtable_abi::rtti::*;
 
+use alloc::vec;
 use alloc::vec::Vec;
+use core::any::type_name;
 use core::ffi::c_void;
 use core::fmt;
 use core::marker::PhantomData;
@@ -17,14 +19,12 @@ use core::mem::size_of;
 use core::ops::Deref;
 
 use crate::hook::ShadowVtable;
-use crate::{Implement, Object, OwnedObject, VtableLayout};
+use crate::{CppInterface, Implement, Implements, Object, OwnedObject, VtableLayout};
 
 /// A structural mismatch detected before installing native RTTI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RttiError {
-    /// Metadata must have one entry per directly implemented interface.
-    InterfaceCount,
-    /// Every C++ interface needs metadata, and C interfaces must use `None`.
+    /// Every C++ pointer interface needs metadata, and C interfaces take none.
     InterfaceKind,
     /// The metadata uses a different C++ ABI from the interface declaration.
     AbiMismatch,
@@ -45,7 +45,6 @@ pub enum RttiError {
 impl fmt::Display for RttiError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
-            Self::InterfaceCount => "RTTI metadata count does not match the interface count",
             Self::InterfaceKind => "RTTI requires metadata for C++ pointer interfaces only",
             Self::AbiMismatch => "RTTI metadata ABI does not match the interface",
             Self::OffsetMismatch => "RTTI subobject offset does not match the Rust header",
@@ -64,29 +63,89 @@ impl core::error::Error for RttiError {}
 
 /// Validated native RTTI for every object of the Rust implementation `T`.
 ///
-/// Build one per implementation and native class, then create objects with
-/// [`RttiObject::new`]. Objects copy the class's interface headers, so creating one
-/// costs no more than [`crate::OwnedObject::new`]. The class owns the prefixed
-/// callback tables; every object borrows the class, so it cannot be dropped first.
+/// Build one per implementation and native class with [`Self::builder`], then create
+/// objects with [`RttiObject::new`]. Objects copy the class's interface headers, so
+/// creating one costs no more than [`crate::OwnedObject::new`]. The class owns the
+/// prefixed callback tables; every object borrows the class, so it cannot be dropped
+/// first.
 pub struct RttiClass<T: Implement> {
     vtables: T::Vtables,
     // Owns the tables addressed by `vtables`.
-    _tables: Vec<ShadowVtable>,
+    tables: Vec<ShadowVtable>,
 }
 
 impl<T: Implement> RttiClass<T> {
-    /// Validate native metadata and build the prefixed callback tables.
+    /// Start collecting native metadata for each C++ interface of `T`.
     ///
-    /// Supply metadata in `#[implement]` interface order. Every C++ interface needs
-    /// `Some(metadata)`; C interfaces use `None`. The metadata can be captured from
-    /// compiler-generated tables using [`RttiMetadata`].
+    /// ```ignore
+    /// // SAFETY: The metadata describes a native class matching `Widget`'s interfaces.
+    /// let class = unsafe {
+    ///     RttiClass::<Widget>::builder()
+    ///         .with::<IDerived>(primary)
+    ///         .with::<ISecondary>(secondary)
+    ///         .build()
+    /// }?;
+    /// ```
+    #[must_use]
+    pub fn builder() -> RttiClassBuilder<T> {
+        RttiClassBuilder {
+            metadata: vec![None; T::INTERFACES.len()],
+            implementation: PhantomData,
+        }
+    }
+
+    /// Interface headers for a new object; C++ entries address the owned tables.
+    pub(crate) fn vtables(&self) -> T::Vtables {
+        self.vtables
+    }
+}
+
+impl<T: Implement> fmt::Debug for RttiClass<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "RttiClass<{}>", type_name::<T>())?;
+        formatter.debug_list().entries(&self.tables).finish()
+    }
+}
+
+/// Native metadata for the C++ interfaces of `T`, keyed by interface type.
+///
+/// Create with [`RttiClass::builder`]. C interfaces take no metadata.
+pub struct RttiClassBuilder<T: Implement> {
+    // One entry per interface header, in `#[implement]` order.
+    metadata: Vec<Option<RttiMetadata>>,
+    implementation: PhantomData<fn() -> T>,
+}
+
+impl<T: Implement> RttiClassBuilder<T> {
+    /// Supply the native metadata of the directly implemented C++ interface `I`.
+    ///
+    /// Supplying `I` again replaces its earlier metadata. The metadata can be captured
+    /// from compiler-generated tables using [`RttiMetadata`]. Naming a C interface is a
+    /// compile-time error.
+    #[must_use]
+    pub fn with<I: CppInterface>(mut self, metadata: RttiMetadata) -> Self
+    where
+        T: Implements<I>,
+    {
+        const {
+            assert!(
+                I::CPP_ABI.is_some(),
+                "RTTI metadata applies to C++ interfaces only"
+            );
+        };
+        self.metadata[<T as Implements<I>>::SLOT] = Some(metadata);
+        self
+    }
+
+    /// Validate the metadata and build the prefixed callback tables.
     ///
     /// # Errors
     ///
-    /// Returns [`RttiError`] for mismatched counts, interface kinds, ABIs, type
-    /// identities, offsets, unsupported table layouts or RTTI representations,
-    /// construction tables, or Microsoft metadata marked with virtual inheritance.
-    /// Checked structural mismatches may be supplied and are rejected here.
+    /// Returns [`RttiError::InterfaceKind`] if a C++ interface was not supplied, and
+    /// other [`RttiError`] variants for mismatched ABIs, type identities, offsets,
+    /// unsupported table layouts or RTTI representations, construction tables, or
+    /// Microsoft metadata marked with virtual inheritance. Checked structural
+    /// mismatches may be supplied and are rejected here.
     ///
     /// # Safety
     ///
@@ -101,15 +160,13 @@ impl<T: Implement> RttiClass<T> {
     /// allocation. Callback calls must dispatch through the table: native
     /// final/devirtualized method bodies must not replace Rust callbacks. The metadata
     /// contract of [`RttiMetadata`] applies for as long as objects of this class exist.
-    pub unsafe fn new(metadata: &[Option<RttiMetadata>]) -> Result<Self, RttiError> {
-        if metadata.len() != T::INTERFACES.len() {
-            return Err(RttiError::InterfaceCount);
-        }
+    pub unsafe fn build(self) -> Result<RttiClass<T>, RttiError> {
+        let supplied = self.metadata;
         let mut vtables = T::vtables();
         let headers = core::ptr::from_mut(&mut vtables).cast::<u8>();
         let mut tables = Vec::new();
         let mut type_info = None;
-        for (index, (descriptor, metadata)) in T::INTERFACES.iter().zip(metadata).enumerate() {
+        for (index, (descriptor, metadata)) in T::INTERFACES.iter().zip(supplied).enumerate() {
             let Some(abi) = descriptor.cpp_abi else {
                 if metadata.is_some() {
                     return Err(RttiError::InterfaceKind);
@@ -169,15 +226,14 @@ impl<T: Implement> RttiClass<T> {
             }
             tables.push(table);
         }
-        Ok(Self {
-            vtables,
-            _tables: tables,
-        })
+        Ok(RttiClass { vtables, tables })
     }
+}
 
-    /// Interface headers for a new object; C++ entries address the owned tables.
-    pub(crate) fn vtables(&self) -> T::Vtables {
-        self.vtables
+impl<T: Implement> fmt::Debug for RttiClassBuilder<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "RttiClassBuilder<{}>", type_name::<T>())?;
+        formatter.debug_list().entries(&self.metadata).finish()
     }
 }
 
@@ -239,5 +295,14 @@ impl<T: Implement> Deref for RttiObject<'_, T> {
 
     fn deref(&self) -> &OwnedObject<T> {
         &self.owner
+    }
+}
+
+impl<T: Implement> fmt::Debug for RttiObject<'_, T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("RttiObject")
+            .field(&self.owner)
+            .finish()
     }
 }

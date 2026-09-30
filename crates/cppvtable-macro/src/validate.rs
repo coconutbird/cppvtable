@@ -1,10 +1,12 @@
 //! Validation of a declaration, and the helpers for the lint attributes.
 //!
 //! The generated code must be clean under a lint set that makes every warning an error
-//! and that forbids `#[allow]`. `#[expect]` is an error when the lint does not fire, so
+//! and that denies `#[allow]`. `#[expect]` is an error when the lint does not fire, so
 //! the macro adds an expectation only when it knows that the lint fires. The functions
 //! [`is_snake_case`] and [`needs_non_snake_case`] give that knowledge for
-//! `non_snake_case`.
+//! `non_snake_case`. The only generated `#[allow]` is `deprecated` with a reason, on the
+//! items that implement a deprecated declaration, because whether a use inside an
+//! implementation warns is not known in advance.
 
 use proc_macro2::Span;
 use syn::spanned::Spanned;
