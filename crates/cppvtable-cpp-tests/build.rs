@@ -8,6 +8,7 @@ fn main() {
         "src/returns.rs",
         "src/rtti.rs",
         "src/rtti/smoke.rs",
+        "src/rtti/cast.rs",
         "src/rtti/foreign.rs",
         "src/rtti/hook.rs",
         "src/rtti/relative.rs",

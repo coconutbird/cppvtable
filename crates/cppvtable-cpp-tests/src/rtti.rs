@@ -4,6 +4,8 @@ use cpp::cpp;
 use std::ffi::c_void;
 
 #[cfg(test)]
+mod cast;
+#[cfg(test)]
 mod foreign;
 #[cfg(test)]
 mod hook;
@@ -17,6 +19,7 @@ mod smoke;
 #[repr(u32)]
 enum Class {
     Root = 0,
+    Derived = 1,
     Secondary = 2,
     Unrelated = 3,
     Witness = 4,
@@ -172,6 +175,7 @@ fn type_descriptor(class: Class) -> *const c_void {
     cpp!(unsafe [kind as "std::uint32_t"] -> *const c_void as "const void*" {
         switch (kind) {
         case 0: return &typeid(CppvtableRttiRoot);
+        case 1: return &typeid(CppvtableRttiDerived);
         case 2: return &typeid(CppvtableRttiSecondary);
         case 3: return &typeid(CppvtableRttiUnrelated);
         case 4: return &typeid(CppvtableRttiWitness);

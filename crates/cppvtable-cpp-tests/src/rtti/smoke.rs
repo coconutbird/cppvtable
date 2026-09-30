@@ -1,7 +1,7 @@
 //! RTTI-enabled Rust object dispatch and native runtime casts.
 
 use super::*;
-use cppvtable::rtti::{DynamicCastRuntime, RttiClass, RttiError, RttiMetadata, RttiObject};
+use cppvtable::rtti::{RttiClass, RttiError, RttiMetadata, RttiObject};
 use cppvtable::{Object, OwnedObject, implement, interface};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -115,7 +115,6 @@ fn native_rtti_and_rust_callbacks_survive_ownership_transfer() {
         (secondary as usize) - (primary as usize),
         Object::<RustObject>::slot_offset(1)
     );
-    let runtime = DynamicCastRuntime::TARGET;
     // SAFETY: All pointers and static source/target descriptors match this live object.
     unsafe {
         assert!(native_checks(primary, secondary, 70));
@@ -128,40 +127,11 @@ fn native_rtti_and_rust_callbacks_survive_ownership_transfer() {
                 .contains("CppvtableRttiWitness")
         );
         assert_eq!(info.complete_object(secondary), primary);
-        assert_eq!(
-            runtime.cast(
-                primary,
-                type_descriptor(Class::Root),
-                type_descriptor(Class::Secondary)
-            ),
-            secondary
-        );
-        assert_eq!(
-            runtime.cast(
-                secondary,
-                type_descriptor(Class::Secondary),
-                type_descriptor(Class::Witness)
-            ),
-            primary
-        );
-        assert!(
-            runtime
-                .cast(
-                    primary,
-                    type_descriptor(Class::Root),
-                    type_descriptor(Class::Unrelated)
-                )
-                .is_null()
-        );
-        assert!(
-            runtime
-                .cast(
-                    core::ptr::null_mut(),
-                    type_descriptor(Class::Root),
-                    type_descriptor(Class::Secondary)
-                )
-                .is_null()
-        );
+        let succeeded = super::cast::assert_runtime_matches_language(primary, Class::Root, "Rust")
+            + super::cast::assert_runtime_matches_language(secondary, Class::Secondary, "Rust");
+        // Derived, Secondary, and Witness from the primary; Root, Derived, and Witness
+        // from the secondary.
+        assert_eq!(succeeded, 6);
     }
     drop(owner);
     assert_eq!(drops.load(Ordering::Relaxed), 1);
