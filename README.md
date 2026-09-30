@@ -442,6 +442,11 @@ cargo deny check
 To test without a native compiler, select `cppvtable`, `cppvtable-abi`,
 `cppvtable-com`, and `cppvtable-macro` with Cargo's `-p` options.
 
+With [mise](https://mise.jdx.dev), `mise install` provisions stable Rust, the 1.85.1
+MSRV, the cross targets, and cargo-deny. `mise run ci` runs the portable CI checks,
+and `mise run x86` runs the Windows i686 MSVC tests and lints; `mise tasks` lists
+the individual checks.
+
 The tests cover borrowed foreign objects, Rust implementations, C tables, inherited
 and secondary interfaces, aggregate returns, COM identity, and reference-count
 lifetime transitions. Compiler jobs are defined in `.github/workflows`.
