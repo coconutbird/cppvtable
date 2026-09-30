@@ -533,8 +533,19 @@ impl RttiMetadata {
     }
 
     /// Raw compiler-produced name, without demangling or invoking native code.
+    ///
+    /// The name borrows this view instead of claiming a `'static` lifetime; it is
+    /// valid under the same loaded-metadata contract as the view itself:
+    ///
+    /// ```compile_fail
+    /// use core::ffi::CStr;
+    /// use cppvtable_abi::rtti::RttiMetadata;
+    /// fn escape(metadata: RttiMetadata) -> &'static CStr {
+    ///     metadata.mangled_name()
+    /// }
+    /// ```
     #[must_use]
-    pub fn mangled_name(self) -> &'static CStr {
+    pub fn mangled_name(&self) -> &CStr {
         let descriptor = self.type_info();
         let name = match self.abi() {
             CppAbi::Itanium => unsafe { descriptor.cast::<*const c_char>().add(1).read() },
